@@ -1,1 +1,16 @@
-creds.json
+# Secrets e file sensibili Streamlit
+.streamlit/secrets.toml
+.streamlit/client_secrets.json
+client_secrets.json
+
+# Ambiente Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
