@@ -1,7 +1,12 @@
 # Secrets e file sensibili Streamlit
 .streamlit/secrets.toml
-.streamlit/client_secrets.json
+service-account.json
+service_account.json
+temp_service_account.json
 client_secrets.json
+credentials.json
+*-credentials.json
+*.json.key
 
 # Ambiente Python
 __pycache__/

@@ -6,6 +6,35 @@ from pydrive2.drive import GoogleDrive
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import io
+import logging
+from datetime import datetime
+import os
+import json
+# Prefer zoneinfo (Python 3.9+); se non disponibile usa pytz se presente, altrimenti fallback a UTC
+try:
+    from zoneinfo import ZoneInfo
+    _HAS_ZONEINFO = True
+except Exception:
+    ZoneInfo = None
+    _HAS_ZONEINFO = False
+    try:
+        import pytz
+    except Exception:
+        pytz = None
+
+
+def _now_rome_str():
+    """Return current time in Europe/Rome as formatted string. Falls back to UTC if tz libs missing."""
+    fmt = '%Y-%m-%d %H:%M:%S'
+    try:
+        if _HAS_ZONEINFO and ZoneInfo is not None:
+            return datetime.now(ZoneInfo("Europe/Rome")).strftime(fmt)
+        if 'pytz' in globals() and pytz is not None:
+            return datetime.now(pytz.timezone("Europe/Rome")).strftime(fmt)
+    except Exception:
+        pass
+    # Fallback
+    return datetime.utcnow().strftime(fmt)
 
 st.set_page_config(layout="wide")
 st.markdown("<h2 style='margin-bottom:0;'>Valutazione qualità immagini colonscopiche</h2>", unsafe_allow_html=True)
@@ -16,11 +45,75 @@ if not user_id:
     st.stop()
 
 
-# Autenticazione Google Drive (OAuth)
+# Autenticazione Google Drive tramite Service Account (nessuna autenticazione utente richiesta)
 @st.cache_resource(show_spinner=False)
 def get_drive():
+    """Inizializza Google Drive usando un Service Account.
+    
+    Le credenziali possono essere fornite in due modi:
+    1. File JSON locale: crea un file 'service-account.json' nella stessa directory
+    2. Streamlit Secrets: aggiungi le credenziali in .streamlit/secrets.toml
+    
+    Per Streamlit Cloud, usa secrets.toml con questa struttura:
+    [gcp_service_account]
+    type = "service_account"
+    project_id = "your-project-id"
+    private_key_id = "your-private-key-id"
+    private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+    client_email = "your-service-account@your-project.iam.gserviceaccount.com"
+    client_id = "your-client-id"
+    auth_uri = "https://accounts.google.com/o/oauth2/auth"
+    token_uri = "https://oauth2.googleapis.com/token"
+    auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+    client_x509_cert_url = "your-cert-url"
+    """
     gauth = GoogleAuth()
-    gauth.LocalWebserverAuth()
+    
+    # Determina quale file di credenziali usare
+    if "gcp_service_account" in st.secrets:
+        # Usa Streamlit secrets (per deployment su Streamlit Cloud)
+        service_account_info = dict(st.secrets["gcp_service_account"])
+        
+        # Salva temporaneamente le credenziali in un file
+        temp_cred_file = "temp_service_account.json"
+        with open(temp_cred_file, "w") as f:
+            json.dump(service_account_info, f)
+        
+        service_account_file = temp_cred_file
+        client_email = service_account_info.get('client_email')
+    else:
+        # Usa il file locale service-account.json
+        service_account_file = "service-account.json"
+        if not os.path.exists(service_account_file):
+            st.error(f"""
+            ⚠️ **File delle credenziali non trovato!**
+            
+            Per usare questa applicazione, devi:
+            1. Creare un Service Account su Google Cloud Console
+            2. Scaricare il file JSON delle credenziali
+            3. Salvarlo come `{service_account_file}` nella stessa directory di questo script
+            
+            Oppure configura le credenziali in `.streamlit/secrets.toml` per il deployment.
+            
+            Consulta il file SETUP_SERVICE_ACCOUNT.md per istruzioni dettagliate.
+            """)
+            st.stop()
+        
+        # Leggi l'email del client dal file
+        with open(service_account_file, 'r') as f:
+            service_account_info = json.load(f)
+            client_email = service_account_info.get('client_email')
+    
+    # Configura PyDrive2 per usare il service account
+    gauth.settings['client_config_backend'] = 'service'
+    gauth.settings['service_config'] = {
+        'client_json_file_path': service_account_file,
+        'client_user_email': client_email,  # Questo campo è richiesto da PyDrive2
+    }
+    
+    # Autentica usando il service account
+    gauth.ServiceAuth()
+    
     drive = GoogleDrive(gauth)
     return drive
 
@@ -84,6 +177,7 @@ def get_user_images(user_id: str):
     Es: utenti 1,2,3 -> set A; utenti 4,5,6 -> set B; utenti 7,8,9 -> set C; utenti 10,11,12 -> set A (ricomincia)
     """
     # Leggi gli utenti unici già presenti su Google Sheets
+    logger = logging.getLogger(__name__)
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         dati = conn.read(worksheet="Foglio1").fillna("")
@@ -91,7 +185,10 @@ def get_user_images(user_id: str):
             unique_users = dati["id_utente"].unique().tolist()
         else:
             unique_users = []
-    except Exception:
+    except Exception as e:
+        # Log the error for diagnosis and show a lightweight warning to the user.
+        logger.exception("Errore lettura Google Sheets")
+        st.warning("Impossibile leggere gli utenti da Google Sheets; verrà usata una lista vuota (fallback).")
         unique_users = []
     
     # Se l'utente è già in lista, la sua posizione è quella
@@ -108,6 +205,11 @@ def get_user_images(user_id: str):
     total_datasets = len(all_images_by_dataset)
     images_per_group = IMAGES_PER_DATASET * total_datasets
     total_possible_images = sum(len(imgs) for imgs in all_images_by_dataset.values())
+
+    # Protezione: se per qualche motivo non ci sono immagini totali, evita divisione/modulo per zero
+    if total_possible_images == 0:
+        logging.getLogger(__name__).warning("Nessuna immagine disponibile in all_images_by_dataset")
+        return []
     
     # Calcola l'indice di inizio per questo gruppo
     group_start_idx = (group_number * images_per_group) % total_possible_images
@@ -121,10 +223,12 @@ def get_user_images(user_id: str):
         if len(dataset_images) > 0:
             # Calcola l'offset per questo dataset e gruppo
             dataset_offset = (group_start_idx + (dataset_idx * IMAGES_PER_DATASET)) % len(dataset_images)
-            # Seleziona IMAGES_PER_DATASET immagini da questo dataset (con wrapping se necessario)
+            # Seleziona fino a IMAGES_PER_DATASET immagini da questo dataset (se il dataset è più piccolo,
+            # prendiamo solo quanto è disponibile per evitare duplicati nell'elenco risultante)
+            take_count = min(IMAGES_PER_DATASET, len(dataset_images))
             selected = [
                 dataset_images[(dataset_offset + i) % len(dataset_images)]
-                for i in range(IMAGES_PER_DATASET)
+                for i in range(take_count)
             ]
             user_images.extend(selected)
     
@@ -177,7 +281,8 @@ if indice < len(imgs):
                     "id_utente": user_id,
                     "nome_immagine": img_file['title'],
                     "score": score,
-                    "dataset": folder_name     # aggiunge anche il nome del dataset al record
+                    "dataset": folder_name,    # aggiunge anche il nome del dataset al record
+                    "timestamp": _now_rome_str()
                 })
                 st.session_state.indice += 1
                 st.rerun()
@@ -186,7 +291,7 @@ if indice < len(imgs):
         st.markdown("### Linee guida qualità")
         st.markdown(linee_guida)
     
-    st.markdown(f"<center><small>{indice + 1} / {len(imgs)} immagini valutate</small></center>", unsafe_allow_html=True)
+    st.markdown(f"<center><small>{indice} / {len(imgs)} immagini valutate</small></center>", unsafe_allow_html=True)
     # Prefetch della prossima immagine in background (non blocca la UI)
     next_idx = indice + 1
     if next_idx < len(imgs):
@@ -204,4 +309,4 @@ else:
     dati = conn.read(worksheet="Foglio1").fillna("")
     df_tot = pd.concat([dati, df], ignore_index=True)
     conn.update(worksheet="Foglio1", data=df_tot)
-    st.success("Risultati salvati su Google Sheets!")
+    st.success("Risultati salvati!")
