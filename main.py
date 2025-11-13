@@ -324,9 +324,18 @@ else:
         with st.spinner("Salvataggio risultati su Google Sheets..."):
             try:
                 conn = st.connection("gsheets", type=GSheetsConnection)
-                dati = conn.read(worksheet="Foglio1").fillna("")
-                df_tot = pd.concat([dati, df], ignore_index=True)
-                conn.update(worksheet="Foglio1", data=df_tot)
+                # ✅ FIX: Usa append invece di update per aggiungere righe senza sovrascrivere
+                # Questo preserva i dati degli utenti precedenti
+                existing_data = conn.read(worksheet="Foglio1")
+                
+                # Se il foglio è vuoto, scrivi anche l'header
+                if existing_data.empty:
+                    conn.update(worksheet="Foglio1", data=df)
+                else:
+                    # Altrimenti aggiungi solo le nuove righe
+                    new_data = pd.concat([existing_data, df], ignore_index=True)
+                    conn.update(worksheet="Foglio1", data=new_data)
+                
                 st.session_state.salvato = True
                 st.success("✅ Risultati salvati con successo!")
             except Exception as e:
