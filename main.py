@@ -136,11 +136,6 @@ def get_image_bytes_by_id(file_id: str):
 # ID della cartella principale 'Articolo Polyps'
 ARTICOLO_POLYPS_FOLDER_ID = '1He7eQCE2xI5X8n00A-B-eKEBZjNIw9cJ'
 
-# Recupera tutte le sottocartelle ('Dataset 1', 'Dataset 2', 'Dataset 3')
-folder_list = drive.ListFile(
-    {'q': f"'{ARTICOLO_POLYPS_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"}
-).GetList()
-
 # Linee guida
 linee_guida = """
 - **Luminosità:** l'immagine deve essere ben illuminata senza aree eccessivamente scure o sovraesposte.
@@ -153,18 +148,31 @@ linee_guida = """
 # MODIFICA QUI NUMERO DI IMMAGINI PER DATASET DA MOSTRARE
 IMAGES_PER_DATASET = 3
 
-all_images_by_dataset = {}
-for folder in folder_list:
-    images = drive.ListFile(
-        {'q': f"'{folder['id']}' in parents and trashed=false and mimeType contains 'image/'"}
+# ✅ OTTIMIZZAZIONE 1: Cache del listing cartelle/immagini (evita chiamate API ad ogni rerun)
+@st.cache_data(show_spinner="Caricamento immagini da Google Drive...", ttl=3600)
+def load_all_images_from_drive():
+    """Carica tutte le cartelle e immagini da Google Drive. Cachato per 1 ora."""
+    # Recupera tutte le sottocartelle ('Dataset 1', 'Dataset 2', 'Dataset 3')
+    folder_list = drive.ListFile(
+        {'q': f"'{ARTICOLO_POLYPS_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"}
     ).GetList()
-    all_images_by_dataset[folder['title']] = [
-        {
-            "img_obj": img,
-            "folder_name": folder['title']
-        }
-        for img in images
-    ]
+    
+    all_images_by_dataset = {}
+    for folder in folder_list:
+        images = drive.ListFile(
+            {'q': f"'{folder['id']}' in parents and trashed=false and mimeType contains 'image/'"}
+        ).GetList()
+        # Salviamo solo i metadati essenziali (non l'intero oggetto PyDrive)
+        all_images_by_dataset[folder['title']] = [
+            {
+                "img_obj": {'id': img['id'], 'title': img['title']},
+                "folder_name": folder['title']
+            }
+            for img in images
+        ]
+    return all_images_by_dataset
+
+all_images_by_dataset = load_all_images_from_drive()
 
 if not all_images_by_dataset or all(len(v) == 0 for v in all_images_by_dataset.values()):
     st.warning("Nessuna immagine trovata nelle sottocartelle.")
@@ -287,7 +295,7 @@ if indice < len(imgs):
                     "timestamp": _now_rome_str()
                 })
                 st.session_state.indice += 1
-                st.rerun()
+                st.rerun()  # Necessario per passare subito all'immagine successiva
     
     with col2:
         st.markdown("### Linee guida qualità")
@@ -307,8 +315,30 @@ else:
     st.success("Hai completato tutte le valutazioni!")
     df = pd.DataFrame(st.session_state.valutazioni)
     st.dataframe(df)
-    conn = st.connection("gsheets", type=GSheetsConnection)
-    dati = conn.read(worksheet="Foglio1").fillna("")
-    df_tot = pd.concat([dati, df], ignore_index=True)
-    conn.update(worksheet="Foglio1", data=df_tot)
-    st.success("Risultati salvati!")
+    
+    # ✅ OTTIMIZZAZIONE 3: Salvataggio con retry e gestione errori graceful
+    if "salvato" not in st.session_state:
+        st.session_state.salvato = False
+    
+    if not st.session_state.salvato:
+        with st.spinner("Salvataggio risultati su Google Sheets..."):
+            try:
+                conn = st.connection("gsheets", type=GSheetsConnection)
+                dati = conn.read(worksheet="Foglio1").fillna("")
+                df_tot = pd.concat([dati, df], ignore_index=True)
+                conn.update(worksheet="Foglio1", data=df_tot)
+                st.session_state.salvato = True
+                st.success("✅ Risultati salvati con successo!")
+            except Exception as e:
+                st.error(f"⚠️ Errore durante il salvataggio: {e}")
+                st.info("Puoi scaricare i risultati localmente usando il bottone qui sotto.")
+                # Offri download CSV come fallback
+                csv = df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Scarica risultati (CSV)",
+                    data=csv,
+                    file_name=f"valutazioni_{user_id}_{_now_rome_str().replace(' ', '_').replace(':', '-')}.csv",
+                    mime="text/csv"
+                )
+    else:
+        st.success("✅ Risultati già salvati!")
