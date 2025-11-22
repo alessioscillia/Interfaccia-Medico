@@ -137,3 +137,6 @@ Se il file viene compromesso:
 - Verifica che i secrets siano formattati correttamente
 - Verifica che la `private_key` contenga `\n` per le interruzioni di riga
 - Riavvia l'app dopo aver salvato i secrets
+
+
+Infine copia e incolla secrets nell'app, quando fai il deployment, andando su settings. 

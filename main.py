@@ -50,25 +50,6 @@ if not user_id:
 # Autenticazione Google Drive tramite Service Account (nessuna autenticazione utente richiesta)
 @st.cache_resource(show_spinner=False)
 def get_drive():
-    """Inizializza Google Drive usando un Service Account.
-    
-    Le credenziali possono essere fornite in due modi:
-    1. File JSON locale: crea un file 'service-account.json' nella stessa directory
-    2. Streamlit Secrets: aggiungi le credenziali in .streamlit/secrets.toml
-    
-    Per Streamlit Cloud, usa secrets.toml con questa struttura:
-    [gcp_service_account]
-    type = "service_account"
-    project_id = "your-project-id"
-    private_key_id = "your-private-key-id"
-    private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-    client_email = "your-service-account@your-project.iam.gserviceaccount.com"
-    client_id = "your-client-id"
-    auth_uri = "https://accounts.google.com/o/oauth2/auth"
-    token_uri = "https://oauth2.googleapis.com/token"
-    auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-    client_x509_cert_url = "your-cert-url"
-    """
     gauth = GoogleAuth()
     
     # Determina quale file di credenziali usare
@@ -149,7 +130,7 @@ linee_guida = """
 IMAGES_PER_DATASET = 3
 
 # ✅ OTTIMIZZAZIONE 1: Cache del listing cartelle/immagini (evita chiamate API ad ogni rerun)
-@st.cache_data(show_spinner="Caricamento immagini da Google Drive...", ttl=3600)
+@st.cache_data(show_spinner="Caricamento immagini...", ttl=3600)
 def load_all_images_from_drive():
     """Carica tutte le cartelle e immagini da Google Drive. Cachato per 1 ora."""
     # Recupera tutte le sottocartelle ('Dataset 1', 'Dataset 2', 'Dataset 3')
@@ -218,7 +199,7 @@ def get_user_images(user_id: str):
 
     # Protezione: se per qualche motivo non ci sono immagini totali, evita divisione/modulo per zero
     if total_possible_images == 0:
-        logging.getLogger(__name__).warning("Nessuna immagine disponibile in all_images_by_dataset")
+        logging.getLogger(__name__).warning("Nessuna immagine disponibile")
         return []
     
     # Calcola l'indice di inizio per questo gruppo
@@ -250,6 +231,7 @@ if "immagini" not in st.session_state:
     st.session_state.immagini = get_user_images(user_id)
     st.session_state.indice = 0
     st.session_state.valutazioni = []
+    st.session_state.mostra_riepilogo = False
 
 indice = st.session_state.indice
 imgs = st.session_state.immagini
@@ -269,13 +251,17 @@ if indice < len(imgs):
         image = None
 
     col1, col2 = st.columns([2, 1])
+    with col2:
+        st.markdown("### Linee guida qualità")
+        st.markdown(linee_guida)
+    
     with col1:
         if image is not None:
             st.image(image, width='stretch')
         st.markdown(f"<b>Dataset:</b> {folder_name}", unsafe_allow_html=True)  # Mostra il nome del dataset
         score = st.slider("Score di qualità (1 = pessima, 10 = ottima)", 1, 10, 5, key=f"score_{indice}")
         
-        col_btn1, col_btn2 = st.columns(2)
+        col_btn1, col_btn2, col_btn3 = st.columns(3)
         with col_btn1:
             if st.button("⬅️ Indietro"):
                 if indice > 0:
@@ -286,7 +272,7 @@ if indice < len(imgs):
                     st.rerun()
         
         with col_btn2:
-            if st.button("Salva voto per questa immagine ➜"):
+            if st.button("Salva voto per questa immagine"):
                 st.session_state.valutazioni.append({
                     "id_utente": user_id,
                     "nome_immagine": img_file['title'],
@@ -296,12 +282,99 @@ if indice < len(imgs):
                 })
                 st.session_state.indice += 1
                 st.rerun()  # Necessario per passare subito all'immagine successiva
-    
-    with col2:
-        st.markdown("### Linee guida qualità")
-        st.markdown(linee_guida)
+        
+        with col_btn3:
+            if st.button("📋 Vedere Riepilogo"):
+                st.session_state.mostra_riepilogo = not st.session_state.mostra_riepilogo
+                st.rerun()
     
     st.markdown(f"<center><small>{indice} / {len(imgs)} immagini valutate</small></center>", unsafe_allow_html=True)
+    
+    # ✅ SEZIONE MODALE RIEPILOGO: mostra come popup elegante con st.container
+    if st.session_state.mostra_riepilogo and len(st.session_state.valutazioni) > 0:
+        # Contenitore modale con stile CSS
+        modal_container = st.container()
+        
+        with modal_container:
+            # Stile modale con bordo e sfondo + nascondere controlli immagine
+            st.markdown("""
+            <style>
+            .riepilogo-modal-box {
+                border: 2px solid #1f77b4;
+                border-radius: 10px;
+                padding: 20px;
+                background-color: #f8f9fa;
+                margin-top: 20px;
+            }
+            .riepilogo-modal-header-box {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 20px;
+                border-bottom: 2px solid #1f77b4;
+                padding-bottom: 15px;
+            }
+            .riepilogo-modal-title {
+                color: #1f77b4;
+                font-size: 24px;
+                font-weight: bold;
+                margin: 0;
+            }
+            /* Nascondi i controlli di Streamlit sulle immagini */
+            button[title="View fullscreen"] {
+                display: none !important;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+            
+            # Intestazione con titolo e bottone chiudi
+            col_title, col_close_btn = st.columns([10, 1])
+            with col_title:
+                st.markdown("<h3 style='color: #1f77b4; margin: 0;'>📸 Riepilogo Valutazioni</h3>", unsafe_allow_html=True)
+            with col_close_btn:
+                if st.button("✕", key="close_riepilogo", help="Chiudi riepilogo"):
+                    st.session_state.mostra_riepilogo = False
+                    st.rerun()
+            
+            st.divider()
+            
+            # Contenuto: griglia di immagini
+            valutazioni = st.session_state.valutazioni
+            cols_per_row = 3  # quante immagini per riga
+            
+            for i in range(0, len(valutazioni), cols_per_row):
+                row_cols = st.columns(cols_per_row)
+                for j, col in enumerate(row_cols):
+                    if i + j < len(valutazioni):
+                        val = valutazioni[i + j]
+                        img_file_id = None
+                        
+                        # Trova l'id dell'immagine dalla lista imgs
+                        for img_entry in imgs:
+                            if img_entry["img_obj"]["title"] == val["nome_immagine"]:
+                                img_file_id = img_entry["img_obj"]["id"]
+                                break
+                        
+                        with col:
+                            # Contenitore per ogni card immagine
+                            st.markdown("<div style='border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px;'>", unsafe_allow_html=True)
+                            
+                            # Scarica e mostra l'anteprima
+                            if img_file_id:
+                                try:
+                                    img_bytes = get_image_bytes_by_id(img_file_id)
+                                    preview_img = Image.open(io.BytesIO(img_bytes))
+                                    st.image(preview_img, use_container_width=True)
+                                except Exception as e:
+                                    st.warning(f"Impossibile caricare")
+                            
+                            # Mostra il nome e lo score
+                            st.markdown(f"<small><b>{val['nome_immagine']}</b></small>", unsafe_allow_html=True)
+                            st.markdown(f"<div style='text-align:center; font-size:20px; font-weight:bold; color:#4CAF50; margin: 10px 0;'>Score: {val['score']}/10</div>", unsafe_allow_html=True)
+                            st.caption(f"Dataset: {val['dataset']}")
+                            
+                            st.markdown("</div>", unsafe_allow_html=True)
+    
     # Prefetch della prossima immagine in background (non blocca la UI)
     next_idx = indice + 1
     if next_idx < len(imgs):
@@ -321,7 +394,7 @@ else:
         st.session_state.salvato = False
     
     if not st.session_state.salvato:
-        with st.spinner("Salvataggio risultati su Google Sheets..."):
+        with st.spinner("Salvataggio risultati..."):
             try:
                 conn = st.connection("gsheets", type=GSheetsConnection)
                 # ✅ FIX: Usa append invece di update per aggiungere righe senza sovrascrivere
