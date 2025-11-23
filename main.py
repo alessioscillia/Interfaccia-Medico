@@ -36,8 +36,16 @@ st.set_page_config(layout="wide", page_title="Valutazione Immagini Mediche")
 # Modificare questo ID con quello della propria cartella condivisa.
 ARTICOLO_POLYPS_FOLDER_ID = '1He7eQCE2xI5X8n00A-B-eKEBZjNIw9cJ'
 
-# Numero di immagini da mostrare per ogni dataset (sottocartella).
+# Numero di immagini da mostrare per ogni dataset (sottocartella) – (non più usato nella nuova logica, ma lasciato per compatibilità).
 IMAGES_PER_DATASET = 3
+
+# Nuova configurazione cartelle (sostituire gli ID placeholder con quelli reali):
+# Cartella che contiene le sottocartelle dei dataset (ex: Dataset 1, Dataset 2, ...).
+DATA_DEVELOPMENT_FOLDER_ID = "1gZc6y9Q0DDHyNLbQoEOJVCdMwH_UIYut"
+# Cartella che contiene i file .txt con le liste di ID delle immagini da mostrare a gruppi di utenti.
+SCORING_FOLDER_ID = "1Joi3sCLkq2GQ1MG4LH2veq0cYftbb9XQ"
+# Numero di utenti che condividono lo stesso set di immagini prima di passare al successivo file di scoring.
+USERS_PER_GROUP = 3  # Modificabile facilmente per future esigenze.
 
 # Linee guida mostrate all'utente durante la valutazione.
 LINEE_GUIDA = """
@@ -131,40 +139,85 @@ def get_image_bytes_by_id(file_id: str):
     buf = f.GetContentIOBuffer()
     return buf.read()
 
-@st.cache_data(show_spinner="Caricamento lista immagini...", ttl=3600)
-def load_all_images_from_drive():
+@st.cache_data(show_spinner="Caricamento immagini...", ttl=3600)
+def load_datasets_and_index():
+    """Carica tutte le immagini dalle sottocartelle di Data-Development e costruisce:
+    - images_by_id: mapping file_id -> {title, folder_name}
+    - datasets: mapping folder_name -> [{'img_obj': {...}, 'folder_name': ...}, ...]
     """
-    Scansiona la cartella principale su Drive e indicizza tutte le immagini
-    divise per sottocartella (dataset).
-    """
-    # 1. Trova le sottocartelle
-    folder_list = drive.ListFile(
-        {'q': f"'{ARTICOLO_POLYPS_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"}
-    ).GetList()
-    
-    all_images_by_dataset = {}
-    
-    # 2. Per ogni sottocartella, trova le immagini
-    for folder in folder_list:
-        images = drive.ListFile(
-            {'q': f"'{folder['id']}' in parents and trashed=false and mimeType contains 'image/'"}
+    try:
+        folder_list = drive.ListFile(
+            {'q': f"'{DATA_DEVELOPMENT_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"}
         ).GetList()
-        
-        all_images_by_dataset[folder['title']] = [
-            {
+    except Exception as e:
+        logging.getLogger(__name__).exception("Errore accesso Data-Development")
+        st.error("Impossibile caricare le immagini. Riprova più tardi o contatta l'amministratore.")
+        return {}, {}
+
+    images_by_id = {}
+    datasets = {}
+    for folder in folder_list:
+        try:
+            images = drive.ListFile(
+                {'q': f"'{folder['id']}' in parents and trashed=false and mimeType contains 'image/'"}
+            ).GetList()
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Impossibile leggere immagini nella cartella {folder.get('title')}: {e}")
+            images = []
+        dataset_entries = []
+        for img in images:
+            entry = {
                 "img_obj": {'id': img['id'], 'title': img['title']},
                 "folder_name": folder['title']
             }
-            for img in images
-        ]
-    return all_images_by_dataset
+            dataset_entries.append(entry)
+            images_by_id[img['id']] = {
+                'title': img['title'],
+                'folder_name': folder['title']
+            }
+        datasets[folder['title']] = dataset_entries
+    return images_by_id, datasets
 
-def get_user_images(user_id: str, all_images_by_dataset: dict):
+@st.cache_data(show_spinner="Preparazione liste di valutazione...", ttl=3600)
+def load_scoring_sets():
+    """Legge tutti i file .txt dentro la cartella Scoring e costruisce una lista di liste di ID immagini.
+    Ogni file .txt deve contenere un ID per riga. I file vengono ordinati alfabeticamente per garantire determinismo.
     """
-    Determina quali immagini mostrare all'utente corrente.
-    Usa una logica deterministica basata sull'ordine degli utenti nel Google Sheet
-    per mostrare set diversi.
+    try:
+        scoring_files = drive.ListFile(
+            {'q': f"'{SCORING_FOLDER_ID}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'"}
+        ).GetList()
+    except Exception as e:
+        logging.getLogger(__name__).exception("Errore accesso Scoring")
+        st.error("Impossibile caricare le liste di valutazione. Contatta l'amministratore.")
+        return []
+
+    txt_files = [f for f in scoring_files if f['title'].lower().endswith('.txt')]
+    txt_files.sort(key=lambda f: f['title'].lower())
+
+    scoring_sets = []
+    for f in txt_files:
+        try:
+            content = f.GetContentString()
+            ids = [line.strip() for line in content.splitlines() if line.strip()]
+            if ids:
+                scoring_sets.append(ids)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Impossibile leggere file di scoring {f['title']}: {e}")
+    return scoring_sets
+
+def get_user_images(user_id: str):
+    """Determina la lista di immagini da mostrare all'utente basandosi sui file di scoring.
+    Gli utenti sono raggruppati in blocchi di USERS_PER_GROUP. Ogni blocco riceve gli ID
+    dal corrispondente file .txt. Finito l'ultimo file si ricomincia dal primo (modulo).
     """
+    images_by_id, _ = load_datasets_and_index()
+    scoring_sets = load_scoring_sets()
+
+    if not scoring_sets:
+        st.error("Non sono state trovate liste di valutazione valide. Contatta l'amministratore.")
+        return []
+
     logger = logging.getLogger(__name__)
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
@@ -177,38 +230,25 @@ def get_user_images(user_id: str, all_images_by_dataset: dict):
         logger.exception("Errore lettura Google Sheets")
         st.warning("Impossibile leggere gli utenti da Google Sheets; verrà usata una lista vuota (fallback).")
         unique_users = []
-    
-    # Trova la posizione dell'utente
+
     if user_id in unique_users:
         user_position = unique_users.index(user_id)
     else:
         user_position = len(unique_users)
-    
-    # Logica di assegnazione (Round Robin semplificato)
-    group_number = user_position // 3
-    total_datasets = len(all_images_by_dataset)
-    images_per_group = IMAGES_PER_DATASET * total_datasets
-    total_possible_images = sum(len(imgs) for imgs in all_images_by_dataset.values())
 
-    if total_possible_images == 0:
-        return []
-    
-    group_start_idx = (group_number * images_per_group) % total_possible_images
-    
+    group_index = user_position // USERS_PER_GROUP
+    scoring_list = scoring_sets[group_index % len(scoring_sets)]
+
     user_images = []
-    sorted_datasets = sorted(all_images_by_dataset.keys())
-    
-    for dataset_idx, dataset_name in enumerate(sorted_datasets):
-        dataset_images = all_images_by_dataset[dataset_name]
-        if len(dataset_images) > 0:
-            dataset_offset = (group_start_idx + (dataset_idx * IMAGES_PER_DATASET)) % len(dataset_images)
-            take_count = min(IMAGES_PER_DATASET, len(dataset_images))
-            selected = [
-                dataset_images[(dataset_offset + i) % len(dataset_images)]
-                for i in range(take_count)
-            ]
-            user_images.extend(selected)
-    
+    for img_id in scoring_list:
+        meta = images_by_id.get(img_id)
+        if not meta:
+            logger.warning(f"ID immagine '{img_id}' non trovato in Data-Development. Ignorato.")
+            continue
+        user_images.append({
+            "img_obj": {'id': img_id, 'title': meta['title']},
+            "folder_name": meta['folder_name']
+        })
     return user_images
 
 # ==============================================================================
@@ -238,7 +278,7 @@ def visualizza_riepilogo():
         # Configurazione Dataframe: MOSTRA SOLO ANTEPRIMA E SCORE
         st.dataframe(
             df_temp,
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             row_height=100, # Altezza aumentata per vedere meglio l'immagine
             column_order=("anteprima", "score"), 
@@ -264,16 +304,19 @@ def main():
         st.warning("Inserisci il tuo nome per proseguire.")
         st.stop()
 
-    # 2. Caricamento Dati (Immagini)
-    all_images_by_dataset = load_all_images_from_drive()
-    
-    if not all_images_by_dataset or all(len(v) == 0 for v in all_images_by_dataset.values()):
-        st.warning("Nessuna immagine trovata nelle sottocartelle.")
+    # 2. Caricamento Dati: indicizzazione immagini & scoring sets (trigger cache)
+    images_by_id, _datasets = load_datasets_and_index()
+    scoring_sets = load_scoring_sets()
+    if not images_by_id:
+        st.warning("Spiacenti, non ci sono immagini disponibili al momento. Contatta l'amministratore.")
+        st.stop()
+    if not scoring_sets:
+        st.warning("Spiacenti, non sono state trovate liste di valutazione. Contatta l'amministratore.")
         st.stop()
 
     # 3. Inizializzazione Session State
     if "immagini" not in st.session_state:
-        st.session_state.immagini = get_user_images(user_id, all_images_by_dataset)
+        st.session_state.immagini = get_user_images(user_id)
         st.session_state.indice = 0
         st.session_state.valutazioni = []
 
@@ -315,7 +358,7 @@ def main():
             col_btn_back, col_btn_save, col_btn_summary = st.columns([1, 1.5, 1])
             
             with col_btn_back:
-                if st.button("⬅️ Indietro", use_container_width=True):
+                if st.button("⬅️ Indietro", width='stretch'):
                     if indice > 0:
                         if st.session_state.valutazioni:
                             st.session_state.valutazioni.pop()
@@ -323,7 +366,7 @@ def main():
                         st.rerun()
             
             with col_btn_save:
-                if st.button("Salva voto e prosegui ➜", use_container_width=True, type="primary"):
+                if st.button("Salva voto e prosegui ➜", width='stretch', type="primary"):
                     st.session_state.valutazioni.append({
                         "id_utente": user_id,
                         "nome_immagine": img_file['title'],
@@ -336,7 +379,7 @@ def main():
                     st.rerun()
 
             with col_btn_summary:
-                if st.button("📋 Riepilogo", use_container_width=True):
+                if st.button("📋 Riepilogo", width='stretch'):
                     visualizza_riepilogo()
         
         st.markdown(f"<center><small>{indice} / {len(imgs)} immagini valutate</small></center>", unsafe_allow_html=True)
