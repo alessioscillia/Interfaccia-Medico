@@ -10,7 +10,7 @@ import logging
 from datetime import datetime
 import os
 import json
-import base64 # Necessario per codificare le immagini per l'anteprima nel dataframe
+import base64 
 
 # Prefer zoneinfo (Python 3.9+); se non disponibile usa pytz se presente, altrimenti fallback a UTC
 try:
@@ -47,50 +47,39 @@ def bytes_to_base64_url(img_bytes):
     """Converte bytes immagine in una stringa data URL base64 per visualizzazione."""
     try:
         b64_encoded = base64.b64encode(img_bytes).decode()
-        # Assumiamo PNG/JPEG generico, il browser di solito gestisce il rendering
         return f"data:image/png;base64,{b64_encoded}"
     except Exception:
          return None
 
 @st.dialog("Riepilogo delle tue scelte", width="large")
 def visualizza_riepilogo():
-    """Mostra un pop-up con i dati salvati e anteprime."""
+    """Mostra un pop-up con SOLO anteprima e voto."""
     if "valutazioni" in st.session_state and st.session_state.valutazioni:
         
-        # Creiamo una lista temporanea di dati per la visualizzazione
         data_for_display = []
         
         # Iteriamo sulle valutazioni salvate
         for item in st.session_state.valutazioni:
-            # Copiamo l'elemento per non modificare i dati originali
             display_item = item.copy()
 
-            # --- GENERAZIONE ANTEPRIMA ---
-            # 1. Recupera i bytes dalla cache usando l'ID salvato
-            # (get_image_bytes_by_id è cachata, quindi è veloce)
+            # Recupera i bytes e converte in base64 per l'anteprima
             img_bytes = get_image_bytes_by_id(display_item["file_id"])
-            # 2. Converti in base64 URL per st.dataframe
             display_item["anteprima"] = bytes_to_base64_url(img_bytes)
             
             data_for_display.append(display_item)
 
         df_temp = pd.DataFrame(data_for_display)
 
-        # Configurazione colonne del Dataframe
+        # Configurazione Dataframe: MOSTRA SOLO ANTEPRIMA E SCORE
         st.dataframe(
             df_temp,
             use_container_width=True,
             hide_index=True,
-            row_height=60, # Aumenta leggermente l'altezza delle righe per le immagini
-            column_order=("anteprima", "nome_immagine", "score", "dataset", "timestamp"),
+            row_height=100, # Aumentato per vedere meglio l'immagine
+            column_order=("anteprima", "score"), # <--- QUI SELEZIONIAMO SOLO LE DUE COLONNE
             column_config={
-                "anteprima": st.column_config.ImageColumn("Anteprima", width="small"), # Icona cliccabile
-                "nome_immagine": "Immagine",
-                "file_id": None, # Nascondi l'ID tecnico
-                "id_utente": None, # Nascondi l'utente (è sempre lo stesso)
-                "score": st.column_config.NumberColumn("Voto", format="%d ⭐"),
-                "dataset": "Dataset",
-                "timestamp": st.column_config.DatetimeColumn("Orario", format="HH:mm:ss")
+                "anteprima": st.column_config.ImageColumn("Anteprima Immagine", width="medium"), 
+                "score": st.column_config.NumberColumn("Voto Assegnato", format="%d ⭐"),
             }
         )
         st.caption(f"Totale immagini valutate: {len(df_temp)}")
@@ -105,54 +94,33 @@ if not user_id:
 
 
 
-# Autenticazione Google Drive tramite Service Account (nessuna autenticazione utente richiesta)
+# Autenticazione Google Drive
 @st.cache_resource(show_spinner=False)
 def get_drive():
     gauth = GoogleAuth()
     
-    # Determina quale file di credenziali usare
     if "gcp_service_account" in st.secrets:
-        # Usa Streamlit secrets (per deployment su Streamlit Cloud)
         service_account_info = dict(st.secrets["gcp_service_account"])
-        
-        # Salva temporaneamente le credenziali in un file
         temp_cred_file = "temp_service_account.json"
         with open(temp_cred_file, "w") as f:
             json.dump(service_account_info, f)
-        
         service_account_file = temp_cred_file
         client_email = service_account_info.get('client_email')
     else:
-        # Usa il file locale service-account.json
         service_account_file = "service-account.json"
         if not os.path.exists(service_account_file):
-            st.error(f"""
-            ⚠️ **File delle credenziali non trovato!**
-            
-            Per usare questa applicazione, devi:
-            1. Creare un Service Account su Google Cloud Console
-            2. Scaricare il file JSON delle credenziali
-            3. Salvarlo come `{service_account_file}` nella stessa directory di questo script
-            
-            Oppure configura le credenziali in `.streamlit/secrets.toml` per il deployment.
-            """)
+            st.error("File delle credenziali non trovato!")
             st.stop()
-        
-        # Leggi l'email del client dal file
         with open(service_account_file, 'r') as f:
             service_account_info = json.load(f)
             client_email = service_account_info.get('client_email')
     
-    # Configura PyDrive2 per usare il service account
     gauth.settings['client_config_backend'] = 'service'
     gauth.settings['service_config'] = {
         'client_json_file_path': service_account_file,
-        'client_user_email': client_email,  # Questo campo è richiesto da PyDrive2
+        'client_user_email': client_email,
     }
-    
-    # Autentica usando il service account
     gauth.ServiceAuth()
-    
     drive = GoogleDrive(gauth)
     return drive
 
@@ -160,21 +128,15 @@ def get_drive():
 drive = get_drive()
 
 
-
-# Cache per download immagine: usa l'id del file per evitare di serializzare l'oggetto PyDrive
 @st.cache_data(show_spinner=False)
 def get_image_bytes_by_id(file_id: str):
-    """Scarica i bytes dell'immagine da Google Drive usando l'id del file."""
     f = drive.CreateFile({'id': file_id})
     buf = f.GetContentIOBuffer()
     return buf.read()
 
 
-# ID della cartella principale 'Articolo Polyps'
 ARTICOLO_POLYPS_FOLDER_ID = '1He7eQCE2xI5X8n00A-B-eKEBZjNIw9cJ'
 
-
-# Linee guida
 linee_guida = """
 - **Luminosità:** l'immagine deve essere ben illuminata senza aree eccessivamente scure o sovraesposte.
 - **Nitidezza:** i dettagli della mucosa devono essere ben visibili, senza sfocatura dovuta a motion blur.
@@ -183,15 +145,10 @@ linee_guida = """
 - **Composizione:** la porzione di interesse deve essere centrata e visibile.
 """
 
-
-# MODIFICA QUI NUMERO DI IMMAGINI PER DATASET DA MOSTRARE
 IMAGES_PER_DATASET = 3
 
-
-# ✅ OTTIMIZZAZIONE 1: Cache del listing cartelle/immagini
 @st.cache_data(show_spinner="Caricamento immagini...", ttl=3600)
 def load_all_images_from_drive():
-    """Carica tutte le cartelle e immagini da Google Drive. Cachato per 1 ora."""
     folder_list = drive.ListFile(
         {'q': f"'{ARTICOLO_POLYPS_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"}
     ).GetList()
@@ -220,8 +177,6 @@ if not all_images_by_dataset or all(len(v) == 0 for v in all_images_by_dataset.v
     st.stop()
 
 
-
-# Funzione per ottenere le immagini assegnate all'utente attuale
 def get_user_images(user_id: str):
     logger = logging.getLogger(__name__)
     try:
@@ -248,7 +203,6 @@ def get_user_images(user_id: str):
     total_possible_images = sum(len(imgs) for imgs in all_images_by_dataset.values())
 
     if total_possible_images == 0:
-        logging.getLogger(__name__).warning("Nessuna immagine disponibile in all_images_by_dataset")
         return []
     
     group_start_idx = (group_number * images_per_group) % total_possible_images
@@ -270,8 +224,6 @@ def get_user_images(user_id: str):
     return user_images
 
 
-
-# Selezione basata su gruppo di utenti
 if "immagini" not in st.session_state:
     st.session_state.immagini = get_user_images(user_id)
     st.session_state.indice = 0
@@ -287,7 +239,6 @@ if indice < len(imgs):
     img_file = curr_entry["img_obj"]
     folder_name = curr_entry["folder_name"]
 
-
     file_id = img_file['id']
     try:
         img_bytes = get_image_bytes_by_id(file_id)
@@ -296,14 +247,11 @@ if indice < len(imgs):
         st.error(f"Errore nel download dell'immagine: {e}")
         image = None
 
-
     col1, col2 = st.columns([1, 2])
-
 
     with col1:
         st.markdown("### Linee guida qualità")
         st.markdown(linee_guida)
-        # Bottone rimosso da qui
     
     with col2:
         if image is not None:
@@ -311,8 +259,7 @@ if indice < len(imgs):
         st.markdown(f"<b>Dataset:</b> {folder_name}", unsafe_allow_html=True)
         score = st.slider("Score di qualità (1 = pessima, 10 = ottima)", 1, 10, 5, key=f"score_{indice}")
         
-        # --- NUOVA DISPOSIZIONE DEI BOTTONI (3 colonne) ---
-        # Usiamo rapporti diversi per dare più spazio al bottone centrale "Salva"
+        # --- DISPOSIZIONE DEI BOTTONI ---
         col_btn_back, col_btn_save, col_btn_summary = st.columns([1, 1.5, 1])
         
         with col_btn_back:
@@ -325,11 +272,10 @@ if indice < len(imgs):
         
         with col_btn_save:
             if st.button("Salva voto e prosegui ➜", use_container_width=True, type="primary"):
-                # Salviamo anche l'ID del file per poter generare l'anteprima nel riepilogo
                 st.session_state.valutazioni.append({
                     "id_utente": user_id,
                     "nome_immagine": img_file['title'],
-                    "file_id": img_file['id'], # <--- NUOVO CAMPO AGGIUNTO
+                    "file_id": img_file['id'], 
                     "score": score,
                     "dataset": folder_name,
                     "timestamp": _now_rome_str()
@@ -338,13 +284,11 @@ if indice < len(imgs):
                 st.rerun()
 
         with col_btn_summary:
-             # --- BOTTONE RIEPILOGO SPOSTATO QUI ---
             if st.button("📋 Riepilogo", use_container_width=True):
                 visualizza_riepilogo()
     
     st.markdown(f"<center><small>{indice} / {len(imgs)} immagini valutate</small></center>", unsafe_allow_html=True)
     
-    # Prefetch background
     next_idx = indice + 1
     if next_idx < len(imgs):
         try:
@@ -356,8 +300,9 @@ else:
     st.success("Hai completato tutte le valutazioni!")
     df = pd.DataFrame(st.session_state.valutazioni)
     
-    # Mostriamo la tabella finale SENZA le immagini codificate, per mantenerla pulita
-    st.dataframe(df, hide_index=True)
+    # Rimuoviamo file_id dalla visualizzazione finale (ma resta nei dati se serve)
+    cols_to_show = [c for c in df.columns if c != 'file_id']
+    st.dataframe(df[cols_to_show], hide_index=True)
     
     if "salvato" not in st.session_state:
         st.session_state.salvato = False
@@ -368,10 +313,13 @@ else:
                 conn = st.connection("gsheets", type=GSheetsConnection)
                 existing_data = conn.read(worksheet="Foglio1")
                 
+                # Rimuovi file_id prima di salvare su sheets per pulizia (opzionale)
+                df_to_save = df.drop(columns=['file_id'], errors='ignore')
+
                 if existing_data.empty:
-                    conn.update(worksheet="Foglio1", data=df)
+                    conn.update(worksheet="Foglio1", data=df_to_save)
                 else:
-                    new_data = pd.concat([existing_data, df], ignore_index=True)
+                    new_data = pd.concat([existing_data, df_to_save], ignore_index=True)
                     conn.update(worksheet="Foglio1", data=new_data)
                 
                 st.session_state.salvato = True
@@ -379,7 +327,7 @@ else:
             except Exception as e:
                 st.error(f"⚠️ Errore durante il salvataggio: {e}")
                 st.info("Puoi scaricare i risultati localmente usando il bottone qui sotto.")
-                csv = df.to_csv(index=False)
+                csv = df.drop(columns=['file_id'], errors='ignore').to_csv(index=False)
                 st.download_button(
                     label="📥 Scarica risultati (CSV)",
                     data=csv,
