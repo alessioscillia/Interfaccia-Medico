@@ -12,7 +12,7 @@ import logging
 import threading
 from datetime import datetime
 
-# Gestione Timezone
+# Timezone Management
 try:
     from zoneinfo import ZoneInfo
     _HAS_ZONEINFO = True
@@ -25,30 +25,32 @@ except Exception:
         pytz = None
 
 # ==============================================================================
-# 1. CONFIGURAZIONE E COSTANTI
+# 1. CONFIGURATION AND CONSTANTS
 # ==============================================================================
 
-st.set_page_config(layout="wide", page_title="Valutazione Immagini Mediche")
+st.set_page_config(layout="wide", page_title="Medical Image Assessment")
 
-# --- CONFIGURAZIONE UTENTE ---
+# --- USER CONFIGURATION ---
 ARTICOLO_POLYPS_FOLDER_ID = '1He7eQCE2xI5X8n00A-B-eKEBZjNIw9cJ'
 DATA_DEVELOPMENT_FOLDER_ID = "1gZc6y9Q0DDHyNLbQoEOJVCdMwH_UIYut"
 SCORING_FOLDER_ID = "1Joi3sCLkq2GQ1MG4LH2veq0cYftbb9XQ"
 USERS_PER_GROUP = 3 
 
+# Translated Guidelines
 LINEE_GUIDA = """
-- **Luminosità:** l'immagine deve essere ben illuminata senza aree eccessivamente scure o sovraesposte.
-- **Nitidezza:** i dettagli della mucosa devono essere ben visibili, senza sfocatura dovuta a motion blur.
-- **Colori naturali:** assenza di dominanti cromatiche innaturali.
-- **Assenza di artefatti:** evitare immagini disturbate da artefatti digitali o movimenti improvvisi.
-- **Composizione:** la porzione di interesse deve essere centrata e visibile.
+- **Brightness:** The image must be well-lit without excessively dark or overexposed areas.
+- **Sharpness:** Mucosal details must be clearly visible, avoiding blurriness due to motion blur.
+- **Natural Colors:** Absence of unnatural color casts.
+- **Absence of Artifacts:** Avoid images disturbed by digital artifacts or sudden movements.
+- **Composition:** The region of interest must be centered and clearly visible.
 """
 
 # ==============================================================================
-# 2. FUNZIONI DI UTILITÀ
+# 2. UTILITY FUNCTIONS
 # ==============================================================================
 
 def _now_rome_str():
+    """Returns current time in Rome timezone (or UTC fallback)."""
     fmt = '%Y-%m-%d %H:%M:%S'
     try:
         if _HAS_ZONEINFO and ZoneInfo is not None:
@@ -67,7 +69,7 @@ def bytes_to_base64_url(img_bytes):
          return None
 
 # ==============================================================================
-# 3. GESTIONE GOOGLE DRIVE E DATI
+# 3. GOOGLE DRIVE AND DATA MANAGEMENT
 # ==============================================================================
 
 @st.cache_resource(show_spinner=False)
@@ -83,7 +85,7 @@ def get_drive():
     else:
         service_account_file = "service-account.json"
         if not os.path.exists(service_account_file):
-            st.error("File delle credenziali 'service-account.json' non trovato!")
+            st.error("Credentials file 'service-account.json' not found!")
             st.stop()
         with open(service_account_file, 'r') as f:
             service_account_info = json.load(f)
@@ -106,14 +108,14 @@ def get_image_bytes_by_id(file_id: str):
     buf = f.GetContentIOBuffer()
     return buf.read()
 
-@st.cache_data(show_spinner="Caricamento immagini...", ttl=3600)
+@st.cache_data(show_spinner="Loading images...", ttl=3600)
 def load_datasets_and_index():
     try:
         folder_list = drive.ListFile(
             {'q': f"'{DATA_DEVELOPMENT_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"}
         ).GetList()
     except Exception:
-        logging.getLogger(__name__).exception("Errore accesso Data-Development")
+        logging.getLogger(__name__).exception("Error accessing Data-Development")
         return {}, {}
 
     images_by_id = {}
@@ -139,14 +141,14 @@ def load_datasets_and_index():
         datasets[folder['title']] = dataset_entries
     return images_by_id, datasets
 
-@st.cache_data(show_spinner="Preparazione liste di valutazione...", ttl=3600)
+@st.cache_data(show_spinner="Preparing evaluation lists...", ttl=3600)
 def load_scoring_sets():
     try:
         scoring_files = drive.ListFile(
             {'q': f"'{SCORING_FOLDER_ID}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'"}
         ).GetList()
     except Exception:
-        logging.getLogger(__name__).exception("Errore accesso Scoring")
+        logging.getLogger(__name__).exception("Error accessing Scoring")
         return []
 
     txt_files = [f for f in scoring_files if f['title'].lower().endswith('.txt')]
@@ -171,16 +173,17 @@ def get_user_images(user_id: str):
     scoring_sets = load_scoring_sets()
 
     if not scoring_sets:
-        st.error("Nessun file di scoring trovato.")
+        st.error("No scoring files found.")
         return [], None
 
     logger = logging.getLogger(__name__)
     
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
+        # IMPORTANT: ttl=0 forces fresh read to see recent saves
         dati = conn.read(worksheet="Foglio1", ttl=0).fillna("")
     except Exception:
-        logger.exception("Errore lettura Google Sheets")
+        logger.exception("Error reading Google Sheets")
         dati = pd.DataFrame()
 
     completed_files = set()
@@ -241,10 +244,10 @@ def get_user_images(user_id: str):
     return user_images, assigned_filename
 
 # ==============================================================================
-# 4. COMPONENTI UI
+# 4. UI COMPONENTS
 # ==============================================================================
 
-@st.dialog("Riepilogo delle tue scelte", width="large")
+@st.dialog("Summary of your choices", width="large")
 def visualizza_riepilogo():
     if "valutazioni" in st.session_state and st.session_state.valutazioni:
         data_for_display = []
@@ -262,51 +265,52 @@ def visualizza_riepilogo():
             row_height=100,
             column_order=("anteprima", "score"), 
             column_config={
-                "anteprima": st.column_config.ImageColumn("Anteprima", width="medium"), 
-                "score": st.column_config.NumberColumn("Voto", format="%d ⭐"),
+                "anteprima": st.column_config.ImageColumn("Preview", width="medium"), 
+                "score": st.column_config.NumberColumn("Score", format="%d ⭐"),
             }
         )
-        st.caption(f"Totale immagini valutate: {len(df_temp)}")
+        st.caption(f"Total images assessed: {len(df_temp)}")
     else:
-        st.info("Nessuna valutazione.")
+        st.info("No assessments yet.")
 
 # ==============================================================================
-# 5. MAIN
+# 5. MAIN APPLICATION FLOW
 # ==============================================================================
 
 def main():
-    st.markdown("<h2 style='margin-bottom:0;'>Valutazione qualità immagini colonscopiche</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 style='margin-bottom:0;'>Colonoscopic Image Quality Assessment</h2>", unsafe_allow_html=True)
     
-    # Controlliamo se la sessione è già avviata (immagini caricate) per disabilitare i campi
+    
+    # Check if session is already started (images locked) to disable input fields
     is_locked = "immagini" in st.session_state and len(st.session_state.immagini) > 0
     
     col_nome, col_cognome = st.columns(2)
     with col_nome:
-        nome = st.text_input("Nome", key="input_nome", disabled=is_locked)
+        nome = st.text_input("First Name", key="input_nome", disabled=is_locked)
     with col_cognome:
-        cognome = st.text_input("Cognome", key="input_cognome", disabled=is_locked)
+        cognome = st.text_input("Last Name", key="input_cognome", disabled=is_locked)
 
-    # --- MODIFICA: Controllo lunghezza minima 1 carattere (ignorando gli spazi) ---
+    # Validation: Minimum length of 1 character (ignoring spaces)
     if len(nome.strip()) < 1 or len(cognome.strip()) < 1:
-        st.warning("Inserisci correttamente Nome e Cognome per proseguire.")
+        st.warning("Please enter your First Name and Last Name to proceed.")
         st.stop()
 
-    # Creazione ID Utente Unico
+    # Create Unique User ID
     user_id = f"{nome.strip()} {cognome.strip()}"
 
     images_by_id, _ = load_datasets_and_index()
     if not images_by_id:
         st.stop()
 
-    # Inizializzazione Session State
+    # Initialize Session State
     if "immagini" not in st.session_state:
-        # Carica immagini
+        # Load images
         imgs, txt_filename = get_user_images(user_id)
         
-        # --- CONTROLLO COMPLETAMENTO ---
+        # --- COMPLETION CHECK ---
         if txt_filename == "COMPLETED":
-            st.success(f"🎉 Complimenti {user_id}! Hai completato tutti i set di valutazione disponibili.")
-            st.info("Non ci sono ulteriori immagini da valutare al momento.")
+            st.success(f"🎉 Congratulations {user_id}! You have completed all available evaluation sets.")
+            st.info("There are no further images to evaluate at this time.")
             st.session_state.immagini = []
             st.session_state.current_txt_file = None
             st.stop()
@@ -315,17 +319,17 @@ def main():
         st.session_state.current_txt_file = txt_filename 
         st.session_state.indice = 0
         st.session_state.valutazioni = []
-        # Forziamo il rerun per bloccare visivamente gli input text immediatamente
+        # Force rerun to visually lock the text inputs immediately
         st.rerun()
 
     indice = st.session_state.indice
     imgs = st.session_state.immagini
     
     if not imgs:
-        st.error("Errore: Nessuna immagine trovata nel set assegnato.")
+        st.error("Error: No images found in the assigned set.")
         st.stop()
 
-    # --- LOOP VALUTAZIONE ---
+    # --- ASSESSMENT LOOP ---
     if indice < len(imgs):
         curr_entry = imgs[indice]
         img_file = curr_entry["img_obj"]
@@ -341,7 +345,7 @@ def main():
         col1, col2 = st.columns([1, 2])
 
         with col1:
-            st.markdown("### Linee guida qualità")
+            st.markdown("### Quality Guidelines")
             st.markdown(LINEE_GUIDA)
         
         with col2:
@@ -350,12 +354,12 @@ def main():
             
             st.markdown(f"<b>Dataset:</b> {folder_name}", unsafe_allow_html=True)
             
-            score = st.slider("Score qualità (1-10)", 1, 10, 5, key=f"score_{indice}")
+            score = st.slider("Quality Score (1-10)", 1, 10, 5, key=f"score_{indice}")
             
             c_back, c_save, c_summ = st.columns([1, 1.5, 1])
             
             with c_back:
-                if st.button("⬅️ Indietro", width='stretch'):
+                if st.button("⬅️ Back", width='stretch'):
                     if indice > 0:
                         if st.session_state.valutazioni:
                             st.session_state.valutazioni.pop()
@@ -363,7 +367,7 @@ def main():
                         st.rerun()
             
             with c_save:
-                if st.button("Avanti ➜", width='stretch', type="primary"):
+                if st.button("Next ➜", width='stretch', type="primary"):
                     st.session_state.valutazioni.append({
                         "id_utente": user_id,
                         "nome_immagine": img_file['title'],
@@ -377,35 +381,35 @@ def main():
                     st.rerun()
 
             with c_summ:
-                if st.button("📋 Riepilogo", width='stretch'):
+                if st.button("📋 Summary", width='stretch'):
                     visualizza_riepilogo()
         
-        st.markdown(f"<center><small>{indice} / {len(imgs)} immagini valutate</small></center>", unsafe_allow_html=True)
+        st.markdown(f"<center><small>{indice} / {len(imgs)} images assessed</small></center>", unsafe_allow_html=True)
         
         if indice + 1 < len(imgs):
             next_id = imgs[indice + 1]['img_obj']['id']
             threading.Thread(target=get_image_bytes_by_id, args=(next_id,), daemon=True).start()
 
-    # --- SCHERMATA FINALE ---
+    # --- FINAL SCREEN ---
     else:
         if "salvato" not in st.session_state:
             st.session_state.salvato = False
 
         if not st.session_state.salvato:
-            st.markdown("## 🎉 Valutazione completata!")
-            st.info("Grazie! Hai valutato tutte le immagini assegnate. Prima di salvare, puoi lasciare un commento opzionale qui sotto.")
+            st.markdown("## 🎉 Evaluation Completed!")
+            st.info("Thank you! You have evaluated all assigned images. Before saving, you can leave an optional comment below.")
             
-            st.markdown("#### 💬 Feedback (facoltativo)")
+            st.markdown("#### 💬 Feedback (optional)")
             feedback_text = st.text_area(
-                "Segnala eventuali problemi o suggerimenti:", 
-                placeholder="Scrivi qui...",
+                "Report any issues or suggestions:", 
+                placeholder="Write here...",
                 height=150
             )
 
             st.write("") 
 
-            if st.button("💾 SALVA E INVIA TUTTI I RISULTATI", type="primary", use_container_width=True):
-                with st.spinner("Salvataggio in corso..."):
+            if st.button("💾 SAVE AND SUBMIT RESULTS", type="primary", use_container_width=True):
+                with st.spinner("Saving in progress..."):
                     try:
                         df = pd.DataFrame(st.session_state.valutazioni)
                         df['feedback'] = feedback_text
@@ -424,34 +428,34 @@ def main():
                         st.session_state.salvato = True
                         st.rerun() 
                     except Exception as e:
-                        st.error(f"⚠️ Errore salvataggio: {e}")
+                        st.error(f"⚠️ Error saving data: {e}")
                         csv = df.drop(columns=['file_id'], errors='ignore').to_csv(index=False)
-                        st.download_button("📥 Scarica backup CSV", csv, "backup_valutazioni.csv", "text/csv")
+                        st.download_button("📥 Download CSV Backup", csv, "backup_valutazioni.csv", "text/csv")
         
         else:
-            st.success("✅ Risultati inviati correttamente!")
+            st.success("✅ Results successfully submitted!")
             st.balloons()
             
-            with st.expander("Vedi riepilogo dati inviati"):
+            with st.expander("View submitted data summary"):
                 df_final = pd.DataFrame(st.session_state.valutazioni)
                 cols_view = [c for c in df_final.columns if c not in ['file_id']]
                 st.dataframe(df_final[cols_view])
 
-            if st.button("🔄 Avvia una nuova sessione (con nuove immagini)"):
-                # 1. Salviamo Nome e Cognome correnti
+            if st.button("🔄 Start a new session (with new images)"):
+                # 1. Save current Name and Surname
                 nome_corr = st.session_state.get("input_nome")
                 cognome_corr = st.session_state.get("input_cognome")
                 
-                # 2. Cancelliamo tutta la memoria
+                # 2. Clear all memory
                 st.session_state.clear()
                 
-                # 3. Ripristiniamo Nome e Cognome
+                # 3. Restore Name and Surname
                 if nome_corr:
                     st.session_state["input_nome"] = nome_corr
                 if cognome_corr:
                     st.session_state["input_cognome"] = cognome_corr
                 
-                # 4. Ricarichiamo la pagina
+                # 4. Rerun
                 st.rerun()
 
 if __name__ == "__main__":
