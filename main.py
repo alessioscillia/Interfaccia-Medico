@@ -141,10 +141,6 @@ def load_datasets_and_index():
 
 @st.cache_data(show_spinner="Preparazione liste di valutazione...", ttl=3600)
 def load_scoring_sets():
-    """
-    Legge i file .txt. Restituisce una lista di dizionari:
-    [{'filename': 'batch1.txt', 'ids': [...]}, ...]
-    """
     try:
         scoring_files = drive.ListFile(
             {'q': f"'{SCORING_FOLDER_ID}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'"}
@@ -154,7 +150,6 @@ def load_scoring_sets():
         return []
 
     txt_files = [f for f in scoring_files if f['title'].lower().endswith('.txt')]
-    # Ordiniamo per nome file per coerenza
     txt_files.sort(key=lambda f: f['title'].lower())
 
     scoring_sets = []
@@ -163,7 +158,6 @@ def load_scoring_sets():
             content = f.GetContentString()
             ids = [line.strip() for line in content.splitlines() if line.strip()]
             if ids:
-                # Modifica: Salvo anche il nome del file
                 scoring_sets.append({
                     "filename": f['title'],
                     "ids": ids
@@ -173,12 +167,8 @@ def load_scoring_sets():
     return scoring_sets
 
 def get_user_images(user_id: str):
-    """
-    Determina immagini e nome del file txt assegnato.
-    Returns: (list_of_images, assigned_txt_filename)
-    """
     images_by_id, _ = load_datasets_and_index()
-    scoring_sets = load_scoring_sets() # Ora è una lista di dict {'filename':..., 'ids':...}
+    scoring_sets = load_scoring_sets()
 
     if not scoring_sets:
         st.error("Nessun file di scoring trovato.")
@@ -186,66 +176,69 @@ def get_user_images(user_id: str):
 
     logger = logging.getLogger(__name__)
     
-    # Lettura storico da Google Sheets
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        dati = conn.read(worksheet="Foglio1").fillna("")
+        # IMPORTANTE: ttl=0 forza la lettura aggiornata per vedere i salvataggi recenti
+        dati = conn.read(worksheet="Foglio1", ttl=0).fillna("")
     except Exception:
         logger.exception("Errore lettura Google Sheets")
         dati = pd.DataFrame()
 
-    # Logica di assegnazione
-    assigned_set_index = 0
-    
-    # 1. Controlliamo se l'utente esiste già nello storico
-    user_exists = False
-    last_assigned_file = None
-    
-    if not dati.empty and "id_utente" in dati.columns:
-        # Filtriamo le righe di questo utente
-        user_rows = dati[dati["id_utente"] == user_id]
-        if not user_rows.empty:
-            user_exists = True
-            # Cerchiamo se c'è la colonna del file assegnato
-            if "file_txt_assegnato" in user_rows.columns:
-                # Prendiamo l'ultimo file assegnato a questo utente
-                last_val = user_rows.iloc[-1]["file_txt_assegnato"]
-                if last_val and str(last_val).strip() != "":
-                    last_assigned_file = str(last_val).strip()
+    # 1. Identifica i file già completati da questo utente
+    completed_files = set()
+    user_position = 0 # Default per nuovi utenti
 
-    if user_exists and last_assigned_file:
-        # CASO: UTENTE DI RITORNO
-        # Troviamo l'indice del file usato l'ultima volta
-        last_idx = -1
-        for i, s_set in enumerate(scoring_sets):
-            if s_set['filename'] == last_assigned_file:
-                last_idx = i
-                break
+    if not dati.empty and "id_utente" in dati.columns:
+        user_rows = dati[dati["id_utente"] == user_id]
         
-        if last_idx != -1:
-            # Assegna il prossimo file (rotazione circolare)
-            assigned_set_index = (last_idx + 1) % len(scoring_sets)
+        # Recupera set di file completati
+        if not user_rows.empty and "file_txt_assegnato" in user_rows.columns:
+            completed_list = user_rows["file_txt_assegnato"].unique().tolist()
+            # Pulizia stringhe (rimuove spazi vuoti e nan)
+            completed_files = set([str(x).strip() for x in completed_list if str(x).strip() != ""])
+
+        # Calcolo posizione utente per assegnazione iniziale (Group Logic)
+        unique_users = dati["id_utente"].unique().tolist()
+        if user_id not in unique_users:
+            user_position = len(unique_users)
         else:
-            # Se il file vecchio non esiste più, riparte da 0 o logica default
-            assigned_set_index = 0
-            
-    else:
-        # CASO: NUOVO UTENTE (o utente vecchio senza colonna 'file_txt_assegnato')
-        # Calcoliamo la posizione in base al numero di utenti unici globali
-        if not dati.empty and "id_utente" in dati.columns:
-            unique_users = dati["id_utente"].unique().tolist()
-            # Se l'utente è nuovo, la sua posizione è alla fine
-            if user_id not in unique_users:
-                user_position = len(unique_users)
-            else:
-                user_position = unique_users.index(user_id)
-        else:
-            user_position = 0
-            
+            user_position = unique_users.index(user_id)
+
+    # 2. Logica di Assegnazione
+    assigned_set_index = -1
+
+    # Caso A: Nuovo utente assoluto (nessun file completato) -> Usa logica Gruppi
+    if not completed_files:
         group_index = user_position // USERS_PER_GROUP
         assigned_set_index = group_index % len(scoring_sets)
+    
+    # Caso B: Utente ricorrente -> Cerca il PRIMO file disponibile che non è in completed_files
+    else:
+        # Prima controlliamo se quello che gli spetterebbe dai gruppi è libero
+        group_idx = (user_position // USERS_PER_GROUP) % len(scoring_sets)
+        if scoring_sets[group_idx]['filename'] not in completed_files:
+            assigned_set_index = group_idx
+        else:
+            # Se quello del gruppo è già fatto, cerchiamo il primo libero scorrendo la lista
+            for i, s_set in enumerate(scoring_sets):
+                if s_set['filename'] not in completed_files:
+                    assigned_set_index = i
+                    break
+    
+    # Se dopo tutto ciò assigned_set_index è ancora -1 o il file scelto è tra i completati (doppio check)
+    # significa che li ha fatti tutti.
+    if assigned_set_index != -1 and scoring_sets[assigned_set_index]['filename'] in completed_files:
+         assigned_set_index = -1 # Forza finished se il loop sopra non ha trovato nulla
+         # Riprova scansione completa lineare per sicurezza
+         for i, s_set in enumerate(scoring_sets):
+                if s_set['filename'] not in completed_files:
+                    assigned_set_index = i
+                    break
 
-    # Recupero i dati del set scelto
+    # 3. Gestione "Tutto completato"
+    if assigned_set_index == -1:
+        return [], "COMPLETED"
+
     chosen_set = scoring_sets[assigned_set_index]
     target_ids = chosen_set['ids']
     assigned_filename = chosen_set['filename']
@@ -304,17 +297,26 @@ def main():
         st.warning("Inserisci il tuo nome per proseguire.")
         st.stop()
 
-    # Caricamento
     images_by_id, _ = load_datasets_and_index()
     if not images_by_id:
         st.stop()
 
     # Inizializzazione Session State
     if "immagini" not in st.session_state:
-        # Recupera immagini E nome del file assegnato
+        # Carica immagini
         imgs, txt_filename = get_user_images(user_id)
+        
+        # --- CONTROLLO COMPLETAMENTO ---
+        if txt_filename == "COMPLETED":
+            st.success("🎉 Complimenti! Hai completato tutti i set di valutazione disponibili.")
+            st.info("Non ci sono ulteriori immagini da valutare al momento.")
+            # Rimuovi dati precedenti se presenti per pulizia
+            st.session_state.immagini = []
+            st.session_state.current_txt_file = None
+            st.stop() # Ferma l'esecuzione qui
+
         st.session_state.immagini = imgs
-        st.session_state.current_txt_file = txt_filename # Salviamo il nome del file in sessione
+        st.session_state.current_txt_file = txt_filename 
         st.session_state.indice = 0
         st.session_state.valutazioni = []
 
@@ -322,10 +324,10 @@ def main():
     imgs = st.session_state.immagini
     
     if not imgs:
-        st.error("Nessuna immagine trovata per questo set di valutazione.")
+        st.error("Errore: Nessuna immagine trovata nel set assegnato.")
         st.stop()
 
-    # Loop Valutazione
+    # --- LOOP VALUTAZIONE ---
     if indice < len(imgs):
         curr_entry = imgs[indice]
         img_file = curr_entry["img_obj"]
@@ -349,8 +351,6 @@ def main():
                 st.image(image, width='stretch')
             
             st.markdown(f"<b>Dataset:</b> {folder_name}", unsafe_allow_html=True)
-            # (Debug opzionale: mostra quale file txt stiamo usando)
-            # st.caption(f"File assegnato: {st.session_state.current_txt_file}")
             
             score = st.slider("Score qualità (1-10)", 1, 10, 5, key=f"score_{indice}")
             
@@ -365,14 +365,13 @@ def main():
                         st.rerun()
             
             with c_save:
-                if st.button("Salva e prosegui ➜", width='stretch', type="primary"):
+                if st.button("Avanti ➜", width='stretch', type="primary"):
                     st.session_state.valutazioni.append({
                         "id_utente": user_id,
                         "nome_immagine": img_file['title'],
                         "file_id": img_file['id'], 
                         "score": score,
                         "dataset": folder_name,
-                        # SALVIAMO IL NOME DEL FILE TXT ASSEGNATO
                         "file_txt_assegnato": st.session_state.current_txt_file,
                         "timestamp": _now_rome_str()
                     })
@@ -385,45 +384,81 @@ def main():
         
         st.markdown(f"<center><small>{indice} / {len(imgs)} immagini valutate</small></center>", unsafe_allow_html=True)
         
-        # Prefetch
         if indice + 1 < len(imgs):
             next_id = imgs[indice + 1]['img_obj']['id']
             threading.Thread(target=get_image_bytes_by_id, args=(next_id,), daemon=True).start()
 
+    # --- SCHERMATA FINALE ---
     else:
-        st.success("Hai completato tutte le valutazioni!")
-        df = pd.DataFrame(st.session_state.valutazioni)
-        
-        # Mostra tabella pulita
-        cols_to_show = [c for c in df.columns if c not in ['file_id']]
-        st.dataframe(df[cols_to_show], hide_index=True)
-        
+        # Inizializza stato salvataggio
         if "salvato" not in st.session_state:
             st.session_state.salvato = False
-        
-        if not st.session_state.salvato:
-            with st.spinner("Salvataggio risultati..."):
-                try:
-                    conn = st.connection("gsheets", type=GSheetsConnection)
-                    existing_data = conn.read(worksheet="Foglio1")
-                    
-                    # Rimuoviamo file_id ma MANTENIAMO file_txt_assegnato
-                    df_to_save = df.drop(columns=['file_id'], errors='ignore')
 
-                    if existing_data.empty:
-                        conn.update(worksheet="Foglio1", data=df_to_save)
-                    else:
-                        new_data = pd.concat([existing_data, df_to_save], ignore_index=True)
-                        conn.update(worksheet="Foglio1", data=new_data)
-                    
-                    st.session_state.salvato = True
-                    st.success("✅ Salvato con successo!")
-                except Exception as e:
-                    st.error(f"⚠️ Errore salvataggio: {e}")
-                    csv = df.drop(columns=['file_id'], errors='ignore').to_csv(index=False)
-                    st.download_button("📥 Scarica CSV", csv, "risultati.csv", "text/csv")
+        # FASE 1: L'utente non ha ancora salvato. Mostriamo SOLO feedback e bottone.
+        if not st.session_state.salvato:
+            st.markdown("## 🎉 Valutazione completata!")
+            st.info("Grazie! Hai valutato tutte le immagini assegnate. Prima di salvare, puoi lasciare un commento opzionale qui sotto.")
+            
+            # Text area per il feedback BEN VISIBILE
+            st.markdown("#### 💬 Feedback (facoltativo)")
+            feedback_text = st.text_area(
+                "Segnala eventuali problemi o suggerimenti:", 
+                placeholder="Scrivi qui...",
+                height=150
+            )
+
+            st.write("") # Spaziatore
+
+            # Bottone Unico e Grande
+            if st.button("💾 SALVA E INVIA TUTTI I RISULTATI", type="primary", use_container_width=True):
+                with st.spinner("Salvataggio in corso..."):
+                    try:
+                        # Creiamo il DataFrame finale
+                        df = pd.DataFrame(st.session_state.valutazioni)
+                        df['feedback'] = feedback_text
+                        
+                        conn = st.connection("gsheets", type=GSheetsConnection)
+                        existing_data = conn.read(worksheet="Foglio1")
+                        
+                        df_to_save = df.drop(columns=['file_id'], errors='ignore')
+
+                        if existing_data.empty:
+                            conn.update(worksheet="Foglio1", data=df_to_save)
+                        else:
+                            new_data = pd.concat([existing_data, df_to_save], ignore_index=True)
+                            conn.update(worksheet="Foglio1", data=new_data)
+                        
+                        st.session_state.salvato = True
+                        st.rerun() # Ricarica per mostrare la schermata di successo
+                    except Exception as e:
+                        st.error(f"⚠️ Errore salvataggio: {e}")
+                        csv = df.drop(columns=['file_id'], errors='ignore').to_csv(index=False)
+                        st.download_button("📥 Scarica backup CSV", csv, "backup_valutazioni.csv", "text/csv")
+        
+        # FASE 2: Salvataggio avvenuto. Mostriamo conferma e riepilogo.
         else:
-            st.success("✅ Risultati già salvati!")
+            st.success("✅ Risultati inviati correttamente!")
+            st.balloons()
+            
+            # Solo ORA mostriamo la tabella, come 'ricevuta'
+            with st.expander("Vedi riepilogo dati inviati"):
+                df_final = pd.DataFrame(st.session_state.valutazioni)
+                cols_view = [c for c in df_final.columns if c not in ['file_id']]
+                st.dataframe(df_final[cols_view])
+
+            if st.button("🔄 Avvia una nuova sessione (con nuove immagini)"):
+                # 1. Salviamo l'ID utente corrente in una variabile temporanea
+                id_corrente = st.session_state.get("user_id")
+                
+                # 2. Cancelliamo tutta la memoria (immagini, voti, ecc.)
+                st.session_state.clear()
+                
+                # 3. Ripristiniamo l'ID utente nella memoria pulita
+                if id_corrente:
+                    st.session_state["user_id"] = id_corrente
+                
+                # 4. Ricarichiamo la pagina
+                st.rerun()
 
 if __name__ == "__main__":
     main()
