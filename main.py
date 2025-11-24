@@ -178,64 +178,49 @@ def get_user_images(user_id: str):
     
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        # IMPORTANTE: ttl=0 forza la lettura aggiornata per vedere i salvataggi recenti
         dati = conn.read(worksheet="Foglio1", ttl=0).fillna("")
     except Exception:
         logger.exception("Errore lettura Google Sheets")
         dati = pd.DataFrame()
 
-    # 1. Identifica i file già completati da questo utente
     completed_files = set()
-    user_position = 0 # Default per nuovi utenti
+    user_position = 0 
 
     if not dati.empty and "id_utente" in dati.columns:
         user_rows = dati[dati["id_utente"] == user_id]
         
-        # Recupera set di file completati
         if not user_rows.empty and "file_txt_assegnato" in user_rows.columns:
             completed_list = user_rows["file_txt_assegnato"].unique().tolist()
-            # Pulizia stringhe (rimuove spazi vuoti e nan)
             completed_files = set([str(x).strip() for x in completed_list if str(x).strip() != ""])
 
-        # Calcolo posizione utente per assegnazione iniziale (Group Logic)
         unique_users = dati["id_utente"].unique().tolist()
         if user_id not in unique_users:
             user_position = len(unique_users)
         else:
             user_position = unique_users.index(user_id)
 
-    # 2. Logica di Assegnazione
     assigned_set_index = -1
 
-    # Caso A: Nuovo utente assoluto (nessun file completato) -> Usa logica Gruppi
     if not completed_files:
         group_index = user_position // USERS_PER_GROUP
         assigned_set_index = group_index % len(scoring_sets)
-    
-    # Caso B: Utente ricorrente -> Cerca il PRIMO file disponibile che non è in completed_files
     else:
-        # Prima controlliamo se quello che gli spetterebbe dai gruppi è libero
         group_idx = (user_position // USERS_PER_GROUP) % len(scoring_sets)
         if scoring_sets[group_idx]['filename'] not in completed_files:
             assigned_set_index = group_idx
         else:
-            # Se quello del gruppo è già fatto, cerchiamo il primo libero scorrendo la lista
             for i, s_set in enumerate(scoring_sets):
                 if s_set['filename'] not in completed_files:
                     assigned_set_index = i
                     break
     
-    # Se dopo tutto ciò assigned_set_index è ancora -1 o il file scelto è tra i completati (doppio check)
-    # significa che li ha fatti tutti.
     if assigned_set_index != -1 and scoring_sets[assigned_set_index]['filename'] in completed_files:
-         assigned_set_index = -1 # Forza finished se il loop sopra non ha trovato nulla
-         # Riprova scansione completa lineare per sicurezza
+         assigned_set_index = -1 
          for i, s_set in enumerate(scoring_sets):
                 if s_set['filename'] not in completed_files:
                     assigned_set_index = i
                     break
 
-    # 3. Gestione "Tutto completato"
     if assigned_set_index == -1:
         return [], "COMPLETED"
 
@@ -291,11 +276,23 @@ def visualizza_riepilogo():
 
 def main():
     st.markdown("<h2 style='margin-bottom:0;'>Valutazione qualità immagini colonscopiche</h2>", unsafe_allow_html=True)
+    
+    # Controlliamo se la sessione è già avviata (immagini caricate) per disabilitare i campi
+    is_locked = "immagini" in st.session_state and len(st.session_state.immagini) > 0
+    
+    col_nome, col_cognome = st.columns(2)
+    with col_nome:
+        nome = st.text_input("Nome", key="input_nome", disabled=is_locked)
+    with col_cognome:
+        cognome = st.text_input("Cognome", key="input_cognome", disabled=is_locked)
 
-    user_id = st.text_input("👨‍⚕️ Id utente:", key="user_id")
-    if not user_id:
-        st.warning("Inserisci il tuo nome per proseguire.")
+    # --- MODIFICA: Controllo lunghezza minima 1 carattere (ignorando gli spazi) ---
+    if len(nome.strip()) < 1 or len(cognome.strip()) < 1:
+        st.warning("Inserisci correttamente Nome e Cognome per proseguire.")
         st.stop()
+
+    # Creazione ID Utente Unico
+    user_id = f"{nome.strip()} {cognome.strip()}"
 
     images_by_id, _ = load_datasets_and_index()
     if not images_by_id:
@@ -308,17 +305,18 @@ def main():
         
         # --- CONTROLLO COMPLETAMENTO ---
         if txt_filename == "COMPLETED":
-            st.success("🎉 Complimenti! Hai completato tutti i set di valutazione disponibili.")
+            st.success(f"🎉 Complimenti {user_id}! Hai completato tutti i set di valutazione disponibili.")
             st.info("Non ci sono ulteriori immagini da valutare al momento.")
-            # Rimuovi dati precedenti se presenti per pulizia
             st.session_state.immagini = []
             st.session_state.current_txt_file = None
-            st.stop() # Ferma l'esecuzione qui
+            st.stop()
 
         st.session_state.immagini = imgs
         st.session_state.current_txt_file = txt_filename 
         st.session_state.indice = 0
         st.session_state.valutazioni = []
+        # Forziamo il rerun per bloccare visivamente gli input text immediatamente
+        st.rerun()
 
     indice = st.session_state.indice
     imgs = st.session_state.immagini
@@ -390,16 +388,13 @@ def main():
 
     # --- SCHERMATA FINALE ---
     else:
-        # Inizializza stato salvataggio
         if "salvato" not in st.session_state:
             st.session_state.salvato = False
 
-        # FASE 1: L'utente non ha ancora salvato. Mostriamo SOLO feedback e bottone.
         if not st.session_state.salvato:
             st.markdown("## 🎉 Valutazione completata!")
             st.info("Grazie! Hai valutato tutte le immagini assegnate. Prima di salvare, puoi lasciare un commento opzionale qui sotto.")
             
-            # Text area per il feedback BEN VISIBILE
             st.markdown("#### 💬 Feedback (facoltativo)")
             feedback_text = st.text_area(
                 "Segnala eventuali problemi o suggerimenti:", 
@@ -407,13 +402,11 @@ def main():
                 height=150
             )
 
-            st.write("") # Spaziatore
+            st.write("") 
 
-            # Bottone Unico e Grande
             if st.button("💾 SALVA E INVIA TUTTI I RISULTATI", type="primary", use_container_width=True):
                 with st.spinner("Salvataggio in corso..."):
                     try:
-                        # Creiamo il DataFrame finale
                         df = pd.DataFrame(st.session_state.valutazioni)
                         df['feedback'] = feedback_text
                         
@@ -429,33 +422,34 @@ def main():
                             conn.update(worksheet="Foglio1", data=new_data)
                         
                         st.session_state.salvato = True
-                        st.rerun() # Ricarica per mostrare la schermata di successo
+                        st.rerun() 
                     except Exception as e:
                         st.error(f"⚠️ Errore salvataggio: {e}")
                         csv = df.drop(columns=['file_id'], errors='ignore').to_csv(index=False)
                         st.download_button("📥 Scarica backup CSV", csv, "backup_valutazioni.csv", "text/csv")
         
-        # FASE 2: Salvataggio avvenuto. Mostriamo conferma e riepilogo.
         else:
             st.success("✅ Risultati inviati correttamente!")
             st.balloons()
             
-            # Solo ORA mostriamo la tabella, come 'ricevuta'
             with st.expander("Vedi riepilogo dati inviati"):
                 df_final = pd.DataFrame(st.session_state.valutazioni)
                 cols_view = [c for c in df_final.columns if c not in ['file_id']]
                 st.dataframe(df_final[cols_view])
 
             if st.button("🔄 Avvia una nuova sessione (con nuove immagini)"):
-                # 1. Salviamo l'ID utente corrente in una variabile temporanea
-                id_corrente = st.session_state.get("user_id")
+                # 1. Salviamo Nome e Cognome correnti
+                nome_corr = st.session_state.get("input_nome")
+                cognome_corr = st.session_state.get("input_cognome")
                 
-                # 2. Cancelliamo tutta la memoria (immagini, voti, ecc.)
+                # 2. Cancelliamo tutta la memoria
                 st.session_state.clear()
                 
-                # 3. Ripristiniamo l'ID utente nella memoria pulita
-                if id_corrente:
-                    st.session_state["user_id"] = id_corrente
+                # 3. Ripristiniamo Nome e Cognome
+                if nome_corr:
+                    st.session_state["input_nome"] = nome_corr
+                if cognome_corr:
+                    st.session_state["input_cognome"] = cognome_corr
                 
                 # 4. Ricarichiamo la pagina
                 st.rerun()
