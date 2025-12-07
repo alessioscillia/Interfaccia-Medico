@@ -490,6 +490,7 @@ def main():
                     st.caption("(Image not found)")
 
         with col2:
+            st.markdown("### Image to Evaluate")
             if image:
                 st.image(image, width='stretch')
             
