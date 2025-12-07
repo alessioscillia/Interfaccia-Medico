@@ -10,6 +10,7 @@ import json
 import base64
 import logging
 import threading
+import uuid
 from datetime import datetime
 
 # Timezone Management
@@ -280,36 +281,74 @@ def visualizza_riepilogo():
 def main():
     st.markdown("<h2 style='margin-bottom:0;'>Colonoscopic Image Quality Assessment</h2>", unsafe_allow_html=True)
     
+    # --- 1. USER & ID MANAGEMENT ---
+    if "user_id" not in st.session_state:
+        st.session_state.user_id = str(uuid.uuid4())[:8].upper()
     
-    # Check if session is already started (images locked) to disable input fields
-    is_locked = "immagini" in st.session_state and len(st.session_state.immagini) > 0
-    
-    col_nome, col_cognome = st.columns(2)
-    with col_nome:
-        nome = st.text_input("First Name", key="input_nome", disabled=is_locked)
-    with col_cognome:
-        cognome = st.text_input("Last Name", key="input_cognome", disabled=is_locked)
+    user_id = st.session_state.user_id
+    st.caption(f"User ID: **{user_id}**")
 
-    # Validation: Minimum length of 1 character (ignoring spaces)
-    if len(nome.strip()) < 1 or len(cognome.strip()) < 1:
-        st.warning("Please enter your First Name and Last Name to proceed.")
+    # State to confirm session start
+    if "session_confirmed" not in st.session_state:
+        st.session_state.session_confirmed = False
+
+    # --- 2. PARTICIPANT INFORMATION ---
+    # Show this section only if not confirmed yet
+    
+    if not st.session_state.session_confirmed:
+        st.markdown("### Participant Information")
+        st.write("Please select your experience level to start:")
+        
+        # Clean options in English
+        options_exp = [
+            "0", 
+            "less than 220", 
+            "more than 220"
+        ]
+        
+        # index=None makes it empty at start
+        esperienza_selezione = st.radio(
+            "How many colonoscopies have you performed?",
+            options=options_exp,
+            index=None,  # <--- No default selection
+            key="radio_esperienza"
+        )
+        
+        st.write("") # Spacing
+        
+        # Confirmation Button
+        if st.button("Confirm and Start", type="primary"):
+            if esperienza_selezione is None:
+                st.error("⚠️ Please select an experience level to proceed.")
+            else:
+                st.session_state.input_esperienza = esperienza_selezione
+                st.session_state.session_confirmed = True
+                st.rerun()
+        
+        # STOP HERE: If not confirmed, do not load images yet
         st.stop()
 
-    # Create Unique User ID
-    user_id = f"{nome.strip()} {cognome.strip()}"
+    # --- IF WE ARE HERE, SESSION IS CONFIRMED ---
+    
+    # Retrieve saved experience
+    esperienza = st.session_state.input_esperienza
+    
+    # Small info header
+    st.info(f"Active Session | Experience: **{esperienza}**")
 
+    # --- 3. IMAGE LOADING & MANAGEMENT ---
     images_by_id, _ = load_datasets_and_index()
     if not images_by_id:
         st.stop()
 
-    # Initialize Session State
+    # Initialize Session State for images
     if "immagini" not in st.session_state:
-        # Load images
-        imgs, txt_filename = get_user_images(user_id)
+        with st.spinner("Assigning image batch..."):
+            imgs, txt_filename = get_user_images(user_id)
         
         # --- COMPLETION CHECK ---
         if txt_filename == "COMPLETED":
-            st.success(f"🎉 Congratulations {user_id}! You have completed all available evaluation sets.")
+            st.success(f"🎉 Congratulations! You have completed all available evaluation sets.")
             st.info("There are no further images to evaluate at this time.")
             st.session_state.immagini = []
             st.session_state.current_txt_file = None
@@ -319,7 +358,6 @@ def main():
         st.session_state.current_txt_file = txt_filename 
         st.session_state.indice = 0
         st.session_state.valutazioni = []
-        # Force rerun to visually lock the text inputs immediately
         st.rerun()
 
     indice = st.session_state.indice
@@ -350,7 +388,7 @@ def main():
         
         with col2:
             if image:
-                st.image(image, width='stretch')
+                st.image(image, use_container_width=True)
             
             st.markdown(f"<b>Dataset:</b> {folder_name}", unsafe_allow_html=True)
             
@@ -359,7 +397,7 @@ def main():
             c_back, c_save, c_summ = st.columns([1, 1.5, 1])
             
             with c_back:
-                if st.button("⬅️ Back", width='stretch'):
+                if st.button("⬅️ Back", use_container_width=True):
                     if indice > 0:
                         if st.session_state.valutazioni:
                             st.session_state.valutazioni.pop()
@@ -367,9 +405,10 @@ def main():
                         st.rerun()
             
             with c_save:
-                if st.button("Next ➜", width='stretch', type="primary"):
+                if st.button("Next ➜", use_container_width=True, type="primary"):
                     st.session_state.valutazioni.append({
                         "id_utente": user_id,
+                        "esperienza": esperienza,
                         "nome_immagine": img_file['title'],
                         "file_id": img_file['id'], 
                         "score": score,
@@ -381,11 +420,12 @@ def main():
                     st.rerun()
 
             with c_summ:
-                if st.button("📋 Summary", width='stretch'):
+                if st.button("📋 Summary", use_container_width=True):
                     visualizza_riepilogo()
         
-        st.markdown(f"<center><small>{indice} / {len(imgs)} images assessed</small></center>", unsafe_allow_html=True)
+        st.markdown(f"<center><small>Image {indice + 1} of {len(imgs)}</small></center>", unsafe_allow_html=True)
         
+        # Pre-loading next image
         if indice + 1 < len(imgs):
             next_id = imgs[indice + 1]['img_obj']['id']
             threading.Thread(target=get_image_bytes_by_id, args=(next_id,), daemon=True).start()
@@ -397,14 +437,10 @@ def main():
 
         if not st.session_state.salvato:
             st.markdown("## 🎉 Evaluation Completed!")
-            st.info("Thank you! You have evaluated all assigned images. Before saving, you can leave an optional comment below.")
+            st.info("Thank you! You have evaluated all assigned images.")
             
             st.markdown("#### 💬 Feedback (optional)")
-            feedback_text = st.text_area(
-                "Report any issues or suggestions:", 
-                placeholder="Write here...",
-                height=150
-            )
+            feedback_text = st.text_area("Report any issues or suggestions:", height=100)
 
             st.write("") 
 
@@ -436,26 +472,21 @@ def main():
             st.success("✅ Results successfully submitted!")
             st.balloons()
             
-            with st.expander("View submitted data summary"):
-                df_final = pd.DataFrame(st.session_state.valutazioni)
-                cols_view = [c for c in df_final.columns if c not in ['file_id']]
-                st.dataframe(df_final[cols_view])
-
             if st.button("🔄 Start a new session (with new images)"):
-                # 1. Save current Name and Surname
-                nome_corr = st.session_state.get("input_nome")
-                cognome_corr = st.session_state.get("input_cognome")
+                # Maintain ID and Experience, reset the rest
+                current_id = st.session_state.user_id
+                current_exp = st.session_state.input_esperienza
                 
-                # 2. Clear all memory
+                # Save confirmation state before clearing
+                temp_confirmed = True 
+                
                 st.session_state.clear()
                 
-                # 3. Restore Name and Surname
-                if nome_corr:
-                    st.session_state["input_nome"] = nome_corr
-                if cognome_corr:
-                    st.session_state["input_cognome"] = cognome_corr
+                # Restore
+                st.session_state.user_id = current_id
+                st.session_state.input_esperienza = current_exp
+                st.session_state.session_confirmed = temp_confirmed
                 
-                # 4. Rerun
                 st.rerun()
 
 if __name__ == "__main__":
