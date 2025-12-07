@@ -11,6 +11,7 @@ import base64
 import logging
 import threading
 import uuid
+import random
 from datetime import datetime
 
 # Timezone Management
@@ -32,10 +33,12 @@ except Exception:
 st.set_page_config(layout="wide", page_title="Medical Image Assessment")
 
 # --- USER CONFIGURATION ---
-ARTICOLO_POLYPS_FOLDER_ID = '1He7eQCE2xI5X8n00A-B-eKEBZjNIw9cJ'
+# Nota: SCORING_FOLDER_ID non serve più per scrivere i file TXT, 
+# ma teniamo le costanti delle immagini.
 DATA_DEVELOPMENT_FOLDER_ID = "1gZc6y9Q0DDHyNLbQoEOJVCdMwH_UIYut"
-SCORING_FOLDER_ID = "1Joi3sCLkq2GQ1MG4LH2veq0cYftbb9XQ"
 USERS_PER_GROUP = 3 
+IMAGES_PER_BATCH = 9 
+TARGET_PER_DATASET = 3 
 
 # Translated Guidelines
 LINEE_GUIDA = """
@@ -76,6 +79,7 @@ def bytes_to_base64_url(img_bytes):
 @st.cache_resource(show_spinner=False)
 def get_drive():
     gauth = GoogleAuth()
+    # Gestione credenziali (uguale a prima)
     if "gcp_service_account" in st.secrets:
         service_account_info = dict(st.secrets["gcp_service_account"])
         temp_cred_file = "temp_service_account.json"
@@ -111,6 +115,7 @@ def get_image_bytes_by_id(file_id: str):
 
 @st.cache_data(show_spinner="Loading images...", ttl=3600)
 def load_datasets_and_index():
+    """Carica la struttura delle cartelle e tutte le immagini disponibili."""
     try:
         folder_list = drive.ListFile(
             {'q': f"'{DATA_DEVELOPMENT_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"}
@@ -128,6 +133,7 @@ def load_datasets_and_index():
             ).GetList()
         except Exception:
             images = []
+        
         dataset_entries = []
         for img in images:
             entry = {
@@ -142,95 +148,181 @@ def load_datasets_and_index():
         datasets[folder['title']] = dataset_entries
     return images_by_id, datasets
 
-@st.cache_data(show_spinner="Preparing evaluation lists...", ttl=3600)
-def load_scoring_sets():
+def get_batches_from_sheet():
+    """Legge i batch dal foglio 'Batches' di Google Sheets."""
     try:
-        scoring_files = drive.ListFile(
-            {'q': f"'{SCORING_FOLDER_ID}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'"}
-        ).GetList()
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        # Leggiamo il foglio 'Batches'. ttl=0 per avere dati freschi.
+        df_batches = conn.read(worksheet="Batches", ttl=0).fillna("")
     except Exception:
-        logging.getLogger(__name__).exception("Error accessing Scoring")
-        return []
-
-    txt_files = [f for f in scoring_files if f['title'].lower().endswith('.txt')]
-    txt_files.sort(key=lambda f: f['title'].lower())
+        logging.getLogger(__name__).exception("Error accessing Batches worksheet")
+        return [], set(), pd.DataFrame()
 
     scoring_sets = []
-    for f in txt_files:
-        try:
-            content = f.GetContentString()
-            ids = [line.strip() for line in content.splitlines() if line.strip()]
-            if ids:
+    used_ids_global = set()
+    
+    # Se il foglio è vuoto o non ha colonne, ritorniamo vuoto
+    if df_batches.empty or "batch_name" not in df_batches.columns:
+        return [], used_ids_global, df_batches
+
+    # Iteriamo sulle righe per ricostruire la struttura
+    for index, row in df_batches.iterrows():
+        b_name = str(row['batch_name']).strip()
+        ids_str = str(row['image_ids']).strip()
+        
+        if b_name and ids_str:
+            # Gli ID sono salvati come stringa separata da virgole "id1,id2,id3"
+            ids_list = [x.strip() for x in ids_str.split(',') if x.strip()]
+            if ids_list:
                 scoring_sets.append({
-                    "filename": f['title'],
-                    "ids": ids
+                    "filename": b_name, # Usiamo 'filename' per compatibilità col resto del codice
+                    "ids": ids_list
                 })
-        except Exception:
-            pass
-    return scoring_sets
+                used_ids_global.update(ids_list)
+    
+    return scoring_sets, used_ids_global, df_batches
+
+def create_new_batch_entry(existing_df, used_ids_global):
+    """Crea un nuovo batch e lo salva nel foglio 'Batches'."""
+    images_by_id, datasets = load_datasets_and_index()
+    
+    # 1. Identifica le immagini disponibili
+    available_images = {} 
+    all_available_pool = []
+    
+    for ds_name, entries in datasets.items():
+        clean_entries = [e for e in entries if e['img_obj']['id'] not in used_ids_global]
+        random.shuffle(clean_entries)
+        available_images[ds_name] = clean_entries
+        all_available_pool.extend(clean_entries)
+    
+    # Soft reset se finiamo le immagini
+    if not all_available_pool:
+        st.warning("⚠️ Recycling images for this session.")
+        all_available_pool = []
+        for ds_name, entries in datasets.items():
+            random.shuffle(entries)
+            available_images[ds_name] = entries
+            all_available_pool.extend(entries)
+
+    # 2. Selezione Immagini
+    selected_entries = []
+    datasets_names = list(datasets.keys())
+    
+    # Primo giro: target per dataset
+    for ds_name in datasets_names:
+        pool = available_images.get(ds_name, [])
+        take_n = min(len(pool), TARGET_PER_DATASET)
+        selected_entries.extend(pool[:take_n])
+        ids_taken = [x['img_obj']['id'] for x in pool[:take_n]]
+        all_available_pool = [x for x in all_available_pool if x['img_obj']['id'] not in ids_taken]
+
+    # Riempimento
+    missing_count = IMAGES_PER_BATCH - len(selected_entries)
+    if missing_count > 0:
+        random.shuffle(all_available_pool)
+        selected_entries.extend(all_available_pool[:missing_count])
+    
+    random.shuffle(selected_entries)
+    
+    new_ids = [entry['img_obj']['id'] for entry in selected_entries]
+    
+    # 3. Preparazione dati per salvataggio
+    # Calcoliamo il prossimo numero di batch
+    next_num = 1
+    if not existing_df.empty and "batch_name" in existing_df.columns:
+        # Cerchiamo di parsare "batch_XX"
+        for name in existing_df["batch_name"]:
+            try:
+                num = int(str(name).replace("batch_", ""))
+                if num >= next_num:
+                    next_num = num + 1
+            except:
+                pass
+    
+    new_batch_name = f"batch_{next_num:02d}"
+    ids_string = ",".join(new_ids)
+    
+    # 4. Salvataggio su Sheet
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        
+        # Creiamo il DataFrame della nuova riga
+        new_row = pd.DataFrame([{"batch_name": new_batch_name, "image_ids": ids_string}])
+        
+        # Uniamo al vecchio e aggiorniamo
+        # Nota: gsheets connection update sovrascrive tutto, quindi dobbiamo concatenare
+        if existing_df.empty:
+            updated_df = new_row
+        else:
+            updated_df = pd.concat([existing_df, new_row], ignore_index=True)
+            
+        conn.update(worksheet="Batches", data=updated_df)
+        
+        return new_batch_name, new_ids
+        
+    except Exception as e:
+        st.error(f"Error saving batch to Sheet: {e}")
+        return None, []
 
 def get_user_images(user_id: str):
     images_by_id, _ = load_datasets_and_index()
-    scoring_sets = load_scoring_sets()
-
-    if not scoring_sets:
-        st.error("No scoring files found.")
-        return [], None
+    # Carichiamo i batch dallo Sheet invece che dai file TXT
+    scoring_sets, used_ids_global, df_batches = get_batches_from_sheet()
 
     logger = logging.getLogger(__name__)
     
+    # Leggi storico valutazioni (Sheet Foglio1)
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        # IMPORTANT: ttl=0 forces fresh read to see recent saves
         dati = conn.read(worksheet="Foglio1", ttl=0).fillna("")
     except Exception:
         logger.exception("Error reading Google Sheets")
         dati = pd.DataFrame()
 
-    completed_files = set()
-    user_position = 0 
-
-    if not dati.empty and "id_utente" in dati.columns:
-        user_rows = dati[dati["id_utente"] == user_id]
-        
-        if not user_rows.empty and "file_txt_assegnato" in user_rows.columns:
-            completed_list = user_rows["file_txt_assegnato"].unique().tolist()
-            completed_files = set([str(x).strip() for x in completed_list if str(x).strip() != ""])
-
-        unique_users = dati["id_utente"].unique().tolist()
-        if user_id not in unique_users:
-            user_position = len(unique_users)
-        else:
-            user_position = unique_users.index(user_id)
-
-    assigned_set_index = -1
-
-    if not completed_files:
-        group_index = user_position // USERS_PER_GROUP
-        assigned_set_index = group_index % len(scoring_sets)
-    else:
-        group_idx = (user_position // USERS_PER_GROUP) % len(scoring_sets)
-        if scoring_sets[group_idx]['filename'] not in completed_files:
-            assigned_set_index = group_idx
-        else:
-            for i, s_set in enumerate(scoring_sets):
-                if s_set['filename'] not in completed_files:
-                    assigned_set_index = i
-                    break
+    # 1. Analizza lo stato dei batch esistenti
+    batch_counts = {s['filename']: 0 for s in scoring_sets} 
+    user_completed_batches = set()
     
-    if assigned_set_index != -1 and scoring_sets[assigned_set_index]['filename'] in completed_files:
-         assigned_set_index = -1 
-         for i, s_set in enumerate(scoring_sets):
-                if s_set['filename'] not in completed_files:
-                    assigned_set_index = i
-                    break
+    if not dati.empty and "file_txt_assegnato" in dati.columns:
+        valid_rows = dati[dati["file_txt_assegnato"].astype(str).str.strip() != ""]
+        usage_stats = valid_rows.groupby("file_txt_assegnato")["id_utente"].nunique()
+        for fname, count in usage_stats.items():
+            if fname in batch_counts:
+                batch_counts[fname] = count
+        
+        user_rows = dati[dati["id_utente"] == user_id]
+        if not user_rows.empty:
+            user_completed_batches = set(user_rows["file_txt_assegnato"].unique())
 
-    if assigned_set_index == -1:
-        return [], "COMPLETED"
+    # 2. Cerca un batch esistente assegnabile
+    assigned_set = None
+    
+    for s_set in scoring_sets:
+        fname = s_set['filename']
+        if fname in user_completed_batches:
+            continue 
+        
+        if batch_counts.get(fname, 0) < USERS_PER_GROUP:
+            assigned_set = s_set
+            break 
+    
+    # 3. Se non c'è batch esistente valido, creane uno nuovo
+    if assigned_set is None:
+        with st.spinner("Generating new image batch..."):
+            # Passiamo df_batches così può calcolare il numero progressivo corretto
+            new_fname, new_ids = create_new_batch_entry(df_batches, used_ids_global)
+            if not new_fname:
+                return [], "ERROR"
+            
+            assigned_set = {
+                "filename": new_fname,
+                "ids": new_ids
+            }
 
-    chosen_set = scoring_sets[assigned_set_index]
-    target_ids = chosen_set['ids']
-    assigned_filename = chosen_set['filename']
+    # 4. Prepara output
+    target_ids = assigned_set['ids']
+    assigned_filename = assigned_set['filename']
 
     user_images = []
     for img_id in target_ids:
@@ -293,30 +385,24 @@ def main():
         st.session_state.session_confirmed = False
 
     # --- 2. PARTICIPANT INFORMATION ---
-    # Show this section only if not confirmed yet
-    
     if not st.session_state.session_confirmed:
-        st.markdown("### Participant Information")
-        st.write("Please select your experience level to start:")
+        st.markdown("### Please select your experience level to start:")
         
-        # Clean options in English
         options_exp = [
             "0", 
             "less than 220", 
             "more than 220"
         ]
         
-        # index=None makes it empty at start
         esperienza_selezione = st.radio(
             "How many colonoscopies have you performed?",
             options=options_exp,
-            index=None,  # <--- No default selection
+            index=None,
             key="radio_esperienza"
         )
         
-        st.write("") # Spacing
+        st.write("") 
         
-        # Confirmation Button
         if st.button("Confirm and Start", type="primary"):
             if esperienza_selezione is None:
                 st.error("⚠️ Please select an experience level to proceed.")
@@ -325,15 +411,10 @@ def main():
                 st.session_state.session_confirmed = True
                 st.rerun()
         
-        # STOP HERE: If not confirmed, do not load images yet
         st.stop()
 
     # --- IF WE ARE HERE, SESSION IS CONFIRMED ---
-    
-    # Retrieve saved experience
     esperienza = st.session_state.input_esperienza
-    
-    # Small info header
     st.info(f"Active Session | Experience: **{esperienza}**")
 
     # --- 3. IMAGE LOADING & MANAGEMENT ---
@@ -346,14 +427,10 @@ def main():
         with st.spinner("Assigning image batch..."):
             imgs, txt_filename = get_user_images(user_id)
         
-        # --- COMPLETION CHECK ---
-        if txt_filename == "COMPLETED":
-            st.success(f"🎉 Congratulations! You have completed all available evaluation sets.")
-            st.info("There are no further images to evaluate at this time.")
-            st.session_state.immagini = []
-            st.session_state.current_txt_file = None
+        if txt_filename == "ERROR":
+            st.error("Critical Error: Could not generate assignment. Please check 'Batches' sheet exists.")
             st.stop()
-
+            
         st.session_state.immagini = imgs
         st.session_state.current_txt_file = txt_filename 
         st.session_state.indice = 0
@@ -388,7 +465,7 @@ def main():
         
         with col2:
             if image:
-                st.image(image, use_container_width=True)
+                st.image(image, width="stretch")
             
             st.markdown(f"<b>Dataset:</b> {folder_name}", unsafe_allow_html=True)
             
@@ -397,7 +474,7 @@ def main():
             c_back, c_save, c_summ = st.columns([1, 1.5, 1])
             
             with c_back:
-                if st.button("⬅️ Back", use_container_width=True):
+                if st.button("⬅️ Back",width="stretch"):
                     if indice > 0:
                         if st.session_state.valutazioni:
                             st.session_state.valutazioni.pop()
@@ -405,7 +482,7 @@ def main():
                         st.rerun()
             
             with c_save:
-                if st.button("Next ➜", use_container_width=True, type="primary"):
+                if st.button("Next ➜", width="stretch", type="primary"):
                     st.session_state.valutazioni.append({
                         "id_utente": user_id,
                         "esperienza": esperienza,
@@ -420,12 +497,11 @@ def main():
                     st.rerun()
 
             with c_summ:
-                if st.button("📋 Summary", use_container_width=True):
+                if st.button("📋 Summary", width="stretch"):
                     visualizza_riepilogo()
         
         st.markdown(f"<center><small>Image {indice + 1} of {len(imgs)}</small></center>", unsafe_allow_html=True)
         
-        # Pre-loading next image
         if indice + 1 < len(imgs):
             next_id = imgs[indice + 1]['img_obj']['id']
             threading.Thread(target=get_image_bytes_by_id, args=(next_id,), daemon=True).start()
@@ -444,7 +520,7 @@ def main():
 
             st.write("") 
 
-            if st.button("💾 SAVE AND SUBMIT RESULTS", type="primary", use_container_width=True):
+            if st.button("💾 SAVE AND SUBMIT RESULTS", type="primary", width="stretch"):
                 with st.spinner("Saving in progress..."):
                     try:
                         df = pd.DataFrame(st.session_state.valutazioni)
@@ -473,16 +549,12 @@ def main():
             st.balloons()
             
             if st.button("🔄 Start a new session (with new images)"):
-                # Maintain ID and Experience, reset the rest
                 current_id = st.session_state.user_id
                 current_exp = st.session_state.input_esperienza
-                
-                # Save confirmation state before clearing
                 temp_confirmed = True 
                 
                 st.session_state.clear()
                 
-                # Restore
                 st.session_state.user_id = current_id
                 st.session_state.input_esperienza = current_exp
                 st.session_state.session_confirmed = temp_confirmed
