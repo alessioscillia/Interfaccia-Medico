@@ -33,12 +33,14 @@ except Exception:
 st.set_page_config(layout="wide", page_title="Medical Image Assessment")
 
 # --- USER CONFIGURATION ---
-# Nota: SCORING_FOLDER_ID non serve più per scrivere i file TXT, 
-# ma teniamo le costanti delle immagini.
 DATA_DEVELOPMENT_FOLDER_ID = "1gZc6y9Q0DDHyNLbQoEOJVCdMwH_UIYut"
 USERS_PER_GROUP = 3 
 IMAGES_PER_BATCH = 9 
 TARGET_PER_DATASET = 3 
+
+# Filenames for Guideline Reference Images
+HIGH_QUALITY_FILENAME = "EndoCV2021_001164.jpg"
+LOW_QUALITY_FILENAME = "C3_EndoCV2021_00153.jpg"
 
 # Translated Guidelines
 LINEE_GUIDA = """
@@ -79,7 +81,6 @@ def bytes_to_base64_url(img_bytes):
 @st.cache_resource(show_spinner=False)
 def get_drive():
     gauth = GoogleAuth()
-    # Gestione credenziali (uguale a prima)
     if "gcp_service_account" in st.secrets:
         service_account_info = dict(st.secrets["gcp_service_account"])
         temp_cred_file = "temp_service_account.json"
@@ -112,6 +113,34 @@ def get_image_bytes_by_id(file_id: str):
     f = drive.CreateFile({'id': file_id})
     buf = f.GetContentIOBuffer()
     return buf.read()
+
+@st.cache_data(show_spinner=False)
+def load_guideline_images():
+    """Cerca e scarica le due immagini di riferimento per le linee guida."""
+    refs = {"high": None, "low": None}
+    
+    # Mappa: chiave -> nome file
+    files_to_find = {
+        "high": HIGH_QUALITY_FILENAME,
+        "low": LOW_QUALITY_FILENAME
+    }
+
+    try:
+        for key, fname in files_to_find.items():
+            # Cerchiamo il file per nome nel Drive (globale, ma escludendo il cestino)
+            # Questo evita di dover sapere l'ID della cartella a priori
+            q = f"title = '{fname}' and trashed=false"
+            file_list = drive.ListFile({'q': q}).GetList()
+            
+            if file_list:
+                # Prendiamo il primo match trovato
+                f_obj = file_list[0]
+                img_bytes = get_image_bytes_by_id(f_obj['id'])
+                refs[key] = Image.open(io.BytesIO(img_bytes))
+    except Exception as e:
+        logging.warning(f"Warning: Could not load guideline images: {e}")
+    
+    return refs
 
 @st.cache_data(show_spinner="Loading images...", ttl=3600)
 def load_datasets_and_index():
@@ -152,7 +181,6 @@ def get_batches_from_sheet():
     """Legge i batch dal foglio 'Batches' di Google Sheets."""
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        # Leggiamo il foglio 'Batches'. ttl=0 per avere dati freschi.
         df_batches = conn.read(worksheet="Batches", ttl=0).fillna("")
     except Exception:
         logging.getLogger(__name__).exception("Error accessing Batches worksheet")
@@ -161,21 +189,18 @@ def get_batches_from_sheet():
     scoring_sets = []
     used_ids_global = set()
     
-    # Se il foglio è vuoto o non ha colonne, ritorniamo vuoto
     if df_batches.empty or "batch_name" not in df_batches.columns:
         return [], used_ids_global, df_batches
 
-    # Iteriamo sulle righe per ricostruire la struttura
     for index, row in df_batches.iterrows():
         b_name = str(row['batch_name']).strip()
         ids_str = str(row['image_ids']).strip()
         
         if b_name and ids_str:
-            # Gli ID sono salvati come stringa separata da virgole "id1,id2,id3"
             ids_list = [x.strip() for x in ids_str.split(',') if x.strip()]
             if ids_list:
                 scoring_sets.append({
-                    "filename": b_name, # Usiamo 'filename' per compatibilità col resto del codice
+                    "filename": b_name,
                     "ids": ids_list
                 })
                 used_ids_global.update(ids_list)
@@ -186,7 +211,6 @@ def create_new_batch_entry(existing_df, used_ids_global):
     """Crea un nuovo batch e lo salva nel foglio 'Batches'."""
     images_by_id, datasets = load_datasets_and_index()
     
-    # 1. Identifica le immagini disponibili
     available_images = {} 
     all_available_pool = []
     
@@ -196,7 +220,6 @@ def create_new_batch_entry(existing_df, used_ids_global):
         available_images[ds_name] = clean_entries
         all_available_pool.extend(clean_entries)
     
-    # Soft reset se finiamo le immagini
     if not all_available_pool:
         st.warning("⚠️ Recycling images for this session.")
         all_available_pool = []
@@ -205,11 +228,9 @@ def create_new_batch_entry(existing_df, used_ids_global):
             available_images[ds_name] = entries
             all_available_pool.extend(entries)
 
-    # 2. Selezione Immagini
     selected_entries = []
     datasets_names = list(datasets.keys())
     
-    # Primo giro: target per dataset
     for ds_name in datasets_names:
         pool = available_images.get(ds_name, [])
         take_n = min(len(pool), TARGET_PER_DATASET)
@@ -217,21 +238,16 @@ def create_new_batch_entry(existing_df, used_ids_global):
         ids_taken = [x['img_obj']['id'] for x in pool[:take_n]]
         all_available_pool = [x for x in all_available_pool if x['img_obj']['id'] not in ids_taken]
 
-    # Riempimento
     missing_count = IMAGES_PER_BATCH - len(selected_entries)
     if missing_count > 0:
         random.shuffle(all_available_pool)
         selected_entries.extend(all_available_pool[:missing_count])
     
     random.shuffle(selected_entries)
-    
     new_ids = [entry['img_obj']['id'] for entry in selected_entries]
     
-    # 3. Preparazione dati per salvataggio
-    # Calcoliamo il prossimo numero di batch
     next_num = 1
     if not existing_df.empty and "batch_name" in existing_df.columns:
-        # Cerchiamo di parsare "batch_XX"
         for name in existing_df["batch_name"]:
             try:
                 num = int(str(name).replace("batch_", ""))
@@ -243,22 +259,16 @@ def create_new_batch_entry(existing_df, used_ids_global):
     new_batch_name = f"batch_{next_num:02d}"
     ids_string = ",".join(new_ids)
     
-    # 4. Salvataggio su Sheet
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        
-        # Creiamo il DataFrame della nuova riga
         new_row = pd.DataFrame([{"batch_name": new_batch_name, "image_ids": ids_string}])
         
-        # Uniamo al vecchio e aggiorniamo
-        # Nota: gsheets connection update sovrascrive tutto, quindi dobbiamo concatenare
         if existing_df.empty:
             updated_df = new_row
         else:
             updated_df = pd.concat([existing_df, new_row], ignore_index=True)
             
         conn.update(worksheet="Batches", data=updated_df)
-        
         return new_batch_name, new_ids
         
     except Exception as e:
@@ -267,12 +277,10 @@ def create_new_batch_entry(existing_df, used_ids_global):
 
 def get_user_images(user_id: str):
     images_by_id, _ = load_datasets_and_index()
-    # Carichiamo i batch dallo Sheet invece che dai file TXT
     scoring_sets, used_ids_global, df_batches = get_batches_from_sheet()
 
     logger = logging.getLogger(__name__)
     
-    # Leggi storico valutazioni (Sheet Foglio1)
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         dati = conn.read(worksheet="Foglio1", ttl=0).fillna("")
@@ -280,7 +288,6 @@ def get_user_images(user_id: str):
         logger.exception("Error reading Google Sheets")
         dati = pd.DataFrame()
 
-    # 1. Analizza lo stato dei batch esistenti
     batch_counts = {s['filename']: 0 for s in scoring_sets} 
     user_completed_batches = set()
     
@@ -295,7 +302,6 @@ def get_user_images(user_id: str):
         if not user_rows.empty:
             user_completed_batches = set(user_rows["file_txt_assegnato"].unique())
 
-    # 2. Cerca un batch esistente assegnabile
     assigned_set = None
     
     for s_set in scoring_sets:
@@ -307,10 +313,8 @@ def get_user_images(user_id: str):
             assigned_set = s_set
             break 
     
-    # 3. Se non c'è batch esistente valido, creane uno nuovo
     if assigned_set is None:
         with st.spinner("Generating new image batch..."):
-            # Passiamo df_batches così può calcolare il numero progressivo corretto
             new_fname, new_ids = create_new_batch_entry(df_batches, used_ids_global)
             if not new_fname:
                 return [], "ERROR"
@@ -320,7 +324,6 @@ def get_user_images(user_id: str):
                 "ids": new_ids
             }
 
-    # 4. Prepara output
     target_ids = assigned_set['ids']
     assigned_filename = assigned_set['filename']
 
@@ -443,6 +446,10 @@ def main():
     if not imgs:
         st.error("Error: No images found in the assigned set.")
         st.stop()
+        
+    # --- LOAD REFERENCE IMAGES FOR GUIDELINES ---
+    # Lo facciamo qui per averle pronte da mostrare in col1
+    guideline_imgs = load_guideline_images()
 
     # --- ASSESSMENT LOOP ---
     if indice < len(imgs):
@@ -462,10 +469,29 @@ def main():
         with col1:
             st.markdown("### Quality Guidelines")
             st.markdown(LINEE_GUIDA)
-        
+            
+            # --- DISPLAY REFERENCE IMAGES ---
+            st.divider()
+            st.markdown("#### Reference Examples")
+            
+            c_good, c_bad = st.columns(2)
+            with c_good:
+                st.caption("✅ High Quality")
+                if guideline_imgs.get("high"):
+                    st.image(guideline_imgs["high"], width='stretch')
+                else:
+                    st.caption("(Image not found)")
+            
+            with c_bad:
+                st.caption("❌ Low Quality")
+                if guideline_imgs.get("low"):
+                    st.image(guideline_imgs["low"], width='stretch')
+                else:
+                    st.caption("(Image not found)")
+
         with col2:
             if image:
-                st.image(image, width="stretch")
+                st.image(image, width='stretch')
             
             st.markdown(f"<b>Dataset:</b> {folder_name}", unsafe_allow_html=True)
             
@@ -474,7 +500,7 @@ def main():
             c_back, c_save, c_summ = st.columns([1, 1.5, 1])
             
             with c_back:
-                if st.button("⬅️ Back",width="stretch"):
+                if st.button("⬅️ Back", width='stretch'):
                     if indice > 0:
                         if st.session_state.valutazioni:
                             st.session_state.valutazioni.pop()
@@ -482,7 +508,7 @@ def main():
                         st.rerun()
             
             with c_save:
-                if st.button("Next ➜", width="stretch", type="primary"):
+                if st.button("Next ➜", width='stretch', type="primary"):
                     st.session_state.valutazioni.append({
                         "id_utente": user_id,
                         "esperienza": esperienza,
@@ -497,7 +523,7 @@ def main():
                     st.rerun()
 
             with c_summ:
-                if st.button("📋 Summary", width="stretch"):
+                if st.button("📋 Summary", width='stretch'):
                     visualizza_riepilogo()
         
         st.markdown(f"<center><small>Image {indice + 1} of {len(imgs)}</small></center>", unsafe_allow_html=True)
@@ -520,7 +546,7 @@ def main():
 
             st.write("") 
 
-            if st.button("💾 SAVE AND SUBMIT RESULTS", type="primary", width="stretch"):
+            if st.button("💾 SAVE AND SUBMIT RESULTS", type="primary", width='stretch'):
                 with st.spinner("Saving in progress..."):
                     try:
                         df = pd.DataFrame(st.session_state.valutazioni)
