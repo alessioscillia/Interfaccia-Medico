@@ -44,11 +44,64 @@ LOW_QUALITY_FILENAME = "C3_EndoCV2021_00153.jpg"
 
 # Translated Guidelines
 LINEE_GUIDA = """
-- **Brightness:** The image must be well-lit without excessively dark or overexposed areas.
-- **Sharpness:** Mucosal details must be clearly visible, avoiding blurriness due to motion blur.
-- **Natural Colors:** Absence of unnatural color casts.
-- **Absence of Artifacts:** Avoid images disturbed by digital artifacts or sudden movements.
-- **Composition:** The region of interest must be centered and clearly visible.
+
+ **Sharpness & Focus**
+  - Clear visualization of mucosal texture, pit patterns, and vascular structures
+  - Minimal motion blur during endoscope movement
+  - Well-defined edges of lesions and anatomical landmarks
+
+ **Brightness**
+  - Image is neither too dark nor overexposed
+  - Adequate illumination across the entire scene
+  - Visibility maintained even in deeper sections of the lumen
+
+ **Uniform & Controlled Lighting**
+  - No harsh shadows or excessively bright spots
+  - Limited glare/reflection artifacts from mucosal surfaces
+
+ **Color Accuracy**
+  - Realistic representation of tissue color
+  - Ability to distinguish between healthy, inflamed, or suspicious areas
+  - Preservation of microvascular contrast
+
+ **Contrast**
+  - Sufficient differentiation between structures of similar morphology
+  - Clear identification of lesion margins
+  - Support for visual detection of flat or subtle lesions
+
+ **Resolution**
+  - High detail visibility even with digital magnification
+  - Minimal pixelation or loss of information
+  - Fine visualization of small or flat polyps
+
+ **Field of View**
+  - Broad angle without significant vignetting
+  - Large portion of the lumen visible in a single frame
+  - Adequate coverage for navigation and lesion search
+
+ **Depth of Field**
+  - Multiple planes in focus simultaneously
+  - Maintains clarity whether viewing near or far surfaces
+
+ **Stability of Image**
+  - Limited vibration, jitter, or rolling-shutter effects
+  - Stable visualization during scope advancement or looping
+  - Minimal shake from tool interactions
+
+ **Minimal Visual Artifacts**
+  - Low noise levels in low-light conditions
+  - Controlled optical distortion (barrel/pincushion)
+  - Reduced interference from fluid, debris, bubbles
+
+ **Recognition of Key Anatomical Structures**
+  - Haustral folds, appendiceal orifice, vascular trees
+  - Polyps of different morphologies (sessile, pedunculated, flat)
+  - Clear assessment of surface patterns for lesion characterization
+
+ **Diagnostic Adequacy**
+  - Information appropriate for detection and characterization
+  - Supports clinical decision-making and therapeutic actions
+  - Enables early identification of clinically relevant findings
 """
 
 # ==============================================================================
@@ -221,7 +274,6 @@ def create_new_batch_entry(existing_df, used_ids_global):
         all_available_pool.extend(clean_entries)
     
     if not all_available_pool:
-        st.warning("⚠️ Recycling images for this session.")
         all_available_pool = []
         for ds_name, entries in datasets.items():
             random.shuffle(entries)
@@ -467,7 +519,7 @@ def main():
         col1, col2 = st.columns([1, 2])
 
         with col1:
-            st.markdown("### Quality Guidelines")
+            st.markdown("### **Criteria for Adequate Endoscopic Image Quality**")
             st.markdown(LINEE_GUIDA)
             
             # --- DISPLAY REFERENCE IMAGES ---
