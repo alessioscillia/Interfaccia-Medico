@@ -42,7 +42,7 @@ TARGET_PER_DATASET = 3
 HIGH_QUALITY_FILENAME = "EndoCV2021_001164.jpg"
 LOW_QUALITY_FILENAME = "C3_EndoCV2021_00153.jpg"
 
-# Translated Guidelines
+# Guidelines
 LINEE_GUIDA = """
 
  **Sharpness & Focus**
@@ -169,10 +169,10 @@ def get_image_bytes_by_id(file_id: str):
 
 @st.cache_data(show_spinner=False)
 def load_guideline_images():
-    """Cerca e scarica le due immagini di riferimento per le linee guida."""
+    """Load and download the two reference images for the guidelines."""
     refs = {"high": None, "low": None}
     
-    # Mappa: chiave -> nome file
+    # Map: key -> filename
     files_to_find = {
         "high": HIGH_QUALITY_FILENAME,
         "low": LOW_QUALITY_FILENAME
@@ -232,11 +232,22 @@ def load_datasets_and_index():
 
 def get_batches_from_sheet():
     """Legge i batch dal foglio 'Batches' di Google Sheets."""
+    conn = None
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
         df_batches = conn.read(worksheet="Batches", ttl=0).fillna("")
     except Exception:
         logging.getLogger(__name__).exception("Error accessing Batches worksheet")
+        return [], set(), pd.DataFrame()
+
+    # Ensure the worksheet has the expected columns; if not, create/reset it with headers
+    required_cols = ["batch_name", "image_ids"]
+    try:
+        if df_batches.empty or any(col not in df_batches.columns for col in required_cols):
+            df_batches = pd.DataFrame(columns=required_cols)
+            conn.update(worksheet="Batches", data=df_batches)
+    except Exception:
+        logging.getLogger(__name__).exception("Error initializing Batches worksheet")
         return [], set(), pd.DataFrame()
 
     scoring_sets = []
@@ -335,7 +346,7 @@ def get_user_images(user_id: str):
     
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        dati = conn.read(worksheet="Foglio1", ttl=0).fillna("")
+        dati = conn.read(worksheet="Results", ttl=0).fillna("")
     except Exception:
         logger.exception("Error reading Google Sheets")
         dati = pd.DataFrame()
@@ -475,6 +486,11 @@ def main():
     # --- 3. IMAGE LOADING & MANAGEMENT ---
     images_by_id, _ = load_datasets_and_index()
     if not images_by_id:
+        st.error(
+            "⚠️ **Unable to load images** \n\n"
+            "We encountered a problem accessing the image database. "
+            "Please contact the administrator for assistance."
+        )
         st.stop()
 
     # Initialize Session State for images
@@ -606,15 +622,15 @@ def main():
                         df['feedback'] = feedback_text
                         
                         conn = st.connection("gsheets", type=GSheetsConnection)
-                        existing_data = conn.read(worksheet="Foglio1")
+                        existing_data = conn.read(worksheet="Results")
                         
                         df_to_save = df.drop(columns=['file_id'], errors='ignore')
 
                         if existing_data.empty:
-                            conn.update(worksheet="Foglio1", data=df_to_save)
+                            conn.update(worksheet="Results", data=df_to_save)
                         else:
                             new_data = pd.concat([existing_data, df_to_save], ignore_index=True)
-                            conn.update(worksheet="Foglio1", data=new_data)
+                            conn.update(worksheet="Results", data=new_data)
                         
                         st.session_state.salvato = True
                         st.rerun() 
