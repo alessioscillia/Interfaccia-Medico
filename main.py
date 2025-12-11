@@ -46,62 +46,32 @@ LOW_QUALITY_FILENAME = "C3_EndoCV2021_00153.jpg"
 LINEE_GUIDA = """
 
  **Sharpness & Focus**
-  - Clear visualization of mucosal texture, pit patterns, and vascular structures
+  - Clear visualization of mucosal texture, pit patterns, vascular structures and lesion margins
   - Minimal motion blur during endoscope movement
-  - Well-defined edges of lesions and anatomical landmarks
 
- **Brightness**
-  - Image is neither too dark nor overexposed
-  - Adequate illumination across the entire scene
-  - Visibility maintained even in deeper sections of the lumen
+ **Lighting & Exposure**
+  - Image is neither too dark nor overexposed, with good visibility even in deeper lumen sections
+  - No harsh shadows and limited glare/reflection artifacts from mucosal surfaces
 
- **Uniform & Controlled Lighting**
-  - No harsh shadows or excessively bright spots
-  - Limited glare/reflection artifacts from mucosal surfaces
-
- **Color Accuracy**
-  - Realistic representation of tissue color
-  - Ability to distinguish between healthy, inflamed, or suspicious areas
-  - Preservation of microvascular contrast
-
- **Contrast**
+ **Color and Contrast**
+  - Realistic representation of tissue color with preserved microvascular contrast
   - Sufficient differentiation between structures of similar morphology
-  - Clear identification of lesion margins
-  - Support for visual detection of flat or subtle lesions
 
  **Resolution**
-  - High detail visibility even with digital magnification
+  - High detail visibility and fine visualization of small or flat polyps
   - Minimal pixelation or loss of information
-  - Fine visualization of small or flat polyps
 
- **Field of View**
-  - Broad angle without significant vignetting
-  - Large portion of the lumen visible in a single frame
-  - Adequate coverage for navigation and lesion search
+ **Field of View and Depth of Field**
+  - Broad angle without significant vignetting, showing a large portion of the lumen
+  - Multiple planes in focus simultaneously, maintaining clarity for both near and distant surfaces
 
- **Depth of Field**
-  - Multiple planes in focus simultaneously
-  - Maintains clarity whether viewing near or far surfaces
+ **Stability and Artifacts**
+  - Stable image with reduced vibration or jitter
+  - Low noise, controlled optical distortion, and limited interference from fluids, debris or bubbles
 
- **Stability of Image**
-  - Limited vibration, jitter, or rolling-shutter effects
-  - Stable visualization during scope advancement or looping
-  - Minimal shake from tool interactions
-
- **Minimal Visual Artifacts**
-  - Low noise levels in low-light conditions
-  - Controlled optical distortion (barrel/pincushion)
-  - Reduced interference from fluid, debris, bubbles
-
- **Recognition of Key Anatomical Structures**
-  - Haustral folds, appendiceal orifice, vascular trees
-  - Polyps of different morphologies (sessile, pedunculated, flat)
-  - Clear assessment of surface patterns for lesion characterization
-
- **Diagnostic Adequacy**
-  - Information appropriate for detection and characterization
-  - Supports clinical decision-making and therapeutic actions
-  - Enables early identification of clinically relevant findings
+ **Recognition & Diagnostic Adequacy**
+  - Reliable visualization of haustral folds, appendiceal orifice, vascular trees and different polyp morphologies
+  - Image quality sufficient for lesion characterization and to support clinical decisions and therapeutic actions
 """
 
 # ==============================================================================
