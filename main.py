@@ -33,10 +33,10 @@ except Exception:
 st.set_page_config(layout="wide", page_title="Medical Image Assessment")
 
 # --- USER CONFIGURATION ---
-DATA_DEVELOPMENT_FOLDER_ID = "1gZc6y9Q0DDHyNLbQoEOJVCdMwH_UIYut"
+DATA_DEVELOPMENT_FOLDER_ID = "1XHP5ZEq-RmJnXlQN8G_LdUHhv2dbVE62"
 USERS_PER_GROUP = 3 
-IMAGES_PER_BATCH = 9 
-TARGET_PER_DATASET = 3 
+IMAGES_PER_BATCH = 30 
+TARGET_PER_DATASET = 6 
 
 # Filenames for Guideline Reference Images
 HIGH_QUALITY_FILENAME = "EndoCV2021_001164.jpg"
