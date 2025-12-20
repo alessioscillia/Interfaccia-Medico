@@ -13,6 +13,8 @@ import threading
 import uuid
 import random
 from datetime import datetime
+import gspread
+from google.oauth2.service_account import Credentials
 
 # Timezone Management
 try:
@@ -97,6 +99,74 @@ def bytes_to_base64_url(img_bytes):
     except Exception:
          return None
 
+
+def get_gspread_client():
+    """Autenticazione sicura per gspread usando st.secrets"""
+    # Definiamo gli scope necessari per scrivere su Sheets e Drive
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    
+    # Carichiamo le credenziali direttamente dai secrets di Streamlit
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    
+    # Creiamo il client
+    client = gspread.authorize(creds)
+    return client
+
+def safe_append_data(data_list, worksheet_name="Results"):
+    """
+    Salva i dati in modalità APPEND (sicura per multi-utente).
+    data_list: lista di dizionari (le tue valutazioni)
+    """
+    try:
+        client = get_gspread_client()
+        # Apri il foglio di calcolo (usa l'URL o il nome del file se è unico)
+        # Nota: Assicurati che il nome del file Google Sheet sia corretto. 
+        # Qui assumo che il foglio si chiami come il titolo dell'app o sia definito nell'URL connection, 
+        # ma con gspread devi aprire il file per Nome esatto o Key.
+        # ESEMPIO: Se il tuo file su Drive si chiama "ValutazioniEndoscopia"
+        # sh = client.open("ValutazioniEndoscopia") 
+        
+        # Se usi l'URL del foglio (più sicuro):
+        sh = client.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"]) 
+        
+        worksheet = sh.worksheet(worksheet_name)
+        
+        # 1. Definiamo l'ordine delle colonne ESATTO come le vuoi nel foglio
+        # Questo è cruciale perché append_row vuole una lista, non un dizionario
+        headers = [
+            "id_utente", " esperienza", "nome_immagine", "dataset", 
+            "score", "file_txt_assegnato", "timestamp", "feedback"
+        ]
+        
+        # 2. Prepariamo le righe da inserire
+        rows_to_append = []
+        for item in data_list:
+            row = [
+                item.get("id_utente", ""),
+                item.get("esperienza", ""),
+                item.get("nome_immagine", ""),
+                item.get("dataset", ""),
+                item.get("score", ""),
+                item.get("file_txt_assegnato", ""),
+                item.get("timestamp", ""),
+                item.get("feedback", "") # Il feedback è nel dataframe ma va passato riga per riga
+            ]
+            rows_to_append.append(row)
+            
+        # 3. Scrittura atomica (Thread-safe lato Google)
+        if rows_to_append:
+            worksheet.append_rows(rows_to_append)
+            return True
+            
+    except Exception as e:
+        logging.error(f"Errore salvataggio gspread: {e}")
+        st.error(f"Errore tecnico nel salvataggio: {e}")
+        return False
+
 # ==============================================================================
 # 3. GOOGLE DRIVE AND DATA MANAGEMENT
 # ==============================================================================
@@ -165,7 +235,7 @@ def load_guideline_images():
     
     return refs
 
-@st.cache_data(show_spinner="Loading images...", ttl=3600)
+@st.cache_data(show_spinner=False)
 def load_datasets_and_index():
     """Carica la struttura delle cartelle e tutte le immagini disponibili."""
     try:
@@ -451,7 +521,6 @@ def main():
 
     # --- IF WE ARE HERE, SESSION IS CONFIRMED ---
     esperienza = st.session_state.input_esperienza
-    st.info(f"Active Session | Experience: **{esperienza}**")
 
     # --- 3. IMAGE LOADING & MANAGEMENT ---
     images_by_id, _ = load_datasets_and_index()
@@ -585,30 +654,34 @@ def main():
 
             st.write("") 
 
-            if st.button("💾 SAVE AND SUBMIT RESULTS", type="primary", width='stretch'):
-                with st.spinner("Saving in progress..."):
-                    try:
-                        df = pd.DataFrame(st.session_state.valutazioni)
-                        df['feedback'] = feedback_text
-                        
-                        conn = st.connection("gsheets", type=GSheetsConnection)
-                        existing_data = conn.read(worksheet="Results")
-                        
-                        df_to_save = df.drop(columns=['file_id'], errors='ignore')
 
-                        if existing_data.empty:
-                            conn.update(worksheet="Results", data=df_to_save)
-                        else:
-                            new_data = pd.concat([existing_data, df_to_save], ignore_index=True)
-                            conn.update(worksheet="Results", data=new_data)
-                        
+            if st.button("💾 SAVE AND SUBMIT RESULTS", type="primary", width='stretch'):
+                with st.spinner("Saving Results..."):
+                    
+                    # 1. Prepariamo i dati aggiungendo il feedback a ogni riga
+                    dati_da_salvare = []
+                    for val in st.session_state.valutazioni:
+                        # Creiamo una copia per non sporcare la session state
+                        entry = val.copy()
+                        # Aggiungiamo il feedback (è uguale per tutte le immagini di questa sessione)
+                        entry['feedback'] = feedback_text 
+                        # Rimuoviamo colonne inutili per il sheet se presenti
+                        entry.pop('file_id', None)
+                        entry.pop('anteprima', None)
+                        dati_da_salvare.append(entry)
+
+                    # 2. Usiamo la NUOVA funzione di salvataggio sicuro
+                    success = safe_append_data(dati_da_salvare, worksheet_name="Results")
+
+                    if success:
                         st.session_state.salvato = True
-                        st.rerun() 
-                    except Exception as e:
-                        st.error(f"⚠️ Error saving data: {e}")
-                        csv = df.drop(columns=['file_id'], errors='ignore').to_csv(index=False)
+                        st.rerun()
+                    else:
+                        # Fallback: se fallisce gspread, offri il CSV
+                        st.error("⚠️ Errore di connessione a Google Sheets.")
+                        df = pd.DataFrame(st.session_state.valutazioni)
+                        csv = df.to_csv(index=False)
                         st.download_button("📥 Download CSV Backup", csv, "backup_valutazioni.csv", "text/csv")
-        
         else:
             st.success("✅ Results successfully submitted!")
             st.balloons()
