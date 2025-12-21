@@ -37,7 +37,7 @@ st.set_page_config(layout="wide", page_title="Medical Image Assessment")
 # --- USER CONFIGURATION ---
 DATA_DEVELOPMENT_FOLDER_ID = "1XHP5ZEq-RmJnXlQN8G_LdUHhv2dbVE62"
 USERS_PER_GROUP = 3 
-IMAGES_PER_BATCH = 30 
+IMAGES_PER_BATCH = 6 
 TARGET_PER_DATASET = 6 
 
 # Filenames for Guideline Reference Images
@@ -102,47 +102,33 @@ def bytes_to_base64_url(img_bytes):
 
 def get_gspread_client():
     """Autenticazione sicura per gspread usando st.secrets"""
-    # Definiamo gli scope necessari per scrivere su Sheets e Drive
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
-    
-    # Carichiamo le credenziali direttamente dai secrets di Streamlit
     creds_dict = dict(st.secrets["gcp_service_account"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    
-    # Creiamo il client
     client = gspread.authorize(creds)
     return client
 
 def safe_append_data(data_list, worksheet_name="Results"):
     """
-    Salva i dati in modalità APPEND (sicura per multi-utente).
-    data_list: lista di dizionari (le tue valutazioni)
+    Salva i dati in modalità APPEND e crea i titoli se il foglio è vuoto.
     """
     try:
         client = get_gspread_client()
-        # Apri il foglio di calcolo (usa l'URL o il nome del file se è unico)
-        # Nota: Assicurati che il nome del file Google Sheet sia corretto. 
-        # Qui assumo che il foglio si chiami come il titolo dell'app o sia definito nell'URL connection, 
-        # ma con gspread devi aprire il file per Nome esatto o Key.
-        # ESEMPIO: Se il tuo file su Drive si chiama "ValutazioniEndoscopia"
-        # sh = client.open("ValutazioniEndoscopia") 
-        
-        # Se usi l'URL del foglio (più sicuro):
         sh = client.open_by_url(st.secrets["connections"]["gsheets"]["spreadsheet"]) 
-        
         worksheet = sh.worksheet(worksheet_name)
         
-        # 1. Definiamo l'ordine delle colonne ESATTO come le vuoi nel foglio
-        # Questo è cruciale perché append_row vuole una lista, non un dizionario
         headers = [
-            "id_utente", " esperienza", "nome_immagine", "dataset", 
-            "score", "file_txt_assegnato", "timestamp", "feedback"
+            "id_utente", "esperienza", "nome_immagine", "dataset", 
+            "score", "batch_txt", "timestamp", "feedback"
         ]
         
-        # 2. Prepariamo le righe da inserire
+        first_row = worksheet.row_values(1)
+        if not first_row:
+            worksheet.insert_row(headers, 1)
+
         rows_to_append = []
         for item in data_list:
             row = [
@@ -151,13 +137,12 @@ def safe_append_data(data_list, worksheet_name="Results"):
                 item.get("nome_immagine", ""),
                 item.get("dataset", ""),
                 item.get("score", ""),
-                item.get("file_txt_assegnato", ""),
+                item.get("batch_txt", ""),
                 item.get("timestamp", ""),
-                item.get("feedback", "") # Il feedback è nel dataframe ma va passato riga per riga
+                item.get("feedback", "")
             ]
             rows_to_append.append(row)
             
-        # 3. Scrittura atomica (Thread-safe lato Google)
         if rows_to_append:
             worksheet.append_rows(rows_to_append)
             return True
@@ -209,10 +194,12 @@ def get_image_bytes_by_id(file_id: str):
 
 @st.cache_data(show_spinner=False)
 def load_guideline_images():
-    """Load and download the two reference images for the guidelines."""
+    """
+    Load images and convert directly to Base64 strings.
+    Questo serve per poterle usare dentro l'HTML personalizzato (mobile view).
+    """
     refs = {"high": None, "low": None}
     
-    # Map: key -> filename
     files_to_find = {
         "high": HIGH_QUALITY_FILENAME,
         "low": LOW_QUALITY_FILENAME
@@ -220,16 +207,14 @@ def load_guideline_images():
 
     try:
         for key, fname in files_to_find.items():
-            # Cerchiamo il file per nome nel Drive (globale, ma escludendo il cestino)
-            # Questo evita di dover sapere l'ID della cartella a priori
             q = f"title = '{fname}' and trashed=false"
             file_list = drive.ListFile({'q': q}).GetList()
             
             if file_list:
-                # Prendiamo il primo match trovato
                 f_obj = file_list[0]
                 img_bytes = get_image_bytes_by_id(f_obj['id'])
-                refs[key] = Image.open(io.BytesIO(img_bytes))
+                # Convertiamo subito in Base64 string per l'HTML
+                refs[key] = bytes_to_base64_url(img_bytes)
     except Exception as e:
         logging.warning(f"Warning: Could not load guideline images: {e}")
     
@@ -237,7 +222,6 @@ def load_guideline_images():
 
 @st.cache_data(show_spinner=False)
 def load_datasets_and_index():
-    """Carica la struttura delle cartelle e tutte le immagini disponibili."""
     try:
         folder_list = drive.ListFile(
             {'q': f"'{DATA_DEVELOPMENT_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"}
@@ -271,7 +255,6 @@ def load_datasets_and_index():
     return images_by_id, datasets
 
 def get_batches_from_sheet():
-    """Legge i batch dal foglio 'Batches' di Google Sheets."""
     conn = None
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
@@ -280,7 +263,6 @@ def get_batches_from_sheet():
         logging.getLogger(__name__).exception("Error accessing Batches worksheet")
         return [], set(), pd.DataFrame()
 
-    # Ensure the worksheet has the expected columns; if not, create/reset it with headers
     required_cols = ["batch_name", "image_ids"]
     try:
         if df_batches.empty or any(col not in df_batches.columns for col in required_cols):
@@ -312,7 +294,6 @@ def get_batches_from_sheet():
     return scoring_sets, used_ids_global, df_batches
 
 def create_new_batch_entry(existing_df, used_ids_global):
-    """Crea un nuovo batch e lo salva nel foglio 'Batches'."""
     images_by_id, datasets = load_datasets_and_index()
     
     available_images = {} 
@@ -394,16 +375,16 @@ def get_user_images(user_id: str):
     batch_counts = {s['filename']: 0 for s in scoring_sets} 
     user_completed_batches = set()
     
-    if not dati.empty and "file_txt_assegnato" in dati.columns:
-        valid_rows = dati[dati["file_txt_assegnato"].astype(str).str.strip() != ""]
-        usage_stats = valid_rows.groupby("file_txt_assegnato")["id_utente"].nunique()
+    if not dati.empty and "batch_txt" in dati.columns:
+        valid_rows = dati[dati["batch_txt"].astype(str).str.strip() != ""]
+        usage_stats = valid_rows.groupby("batch_txt")["id_utente"].nunique()
         for fname, count in usage_stats.items():
             if fname in batch_counts:
                 batch_counts[fname] = count
         
         user_rows = dati[dati["id_utente"] == user_id]
         if not user_rows.empty:
-            user_completed_batches = set(user_rows["file_txt_assegnato"].unique())
+            user_completed_batches = set(user_rows["batch_txt"].unique())
 
     assigned_set = None
     
@@ -555,7 +536,7 @@ def main():
         st.stop()
         
     # --- LOAD REFERENCE IMAGES FOR GUIDELINES ---
-    # Lo facciamo qui per averle pronte da mostrare in col1
+    # Ora restituisce stringhe base64 per l'HTML
     guideline_imgs = load_guideline_images()
 
     # --- ASSESSMENT LOOP ---
@@ -577,29 +558,33 @@ def main():
             st.markdown("### **Criteria for Adequate Endoscopic Image Quality**")
             st.markdown(LINEE_GUIDA)
             
-            # --- DISPLAY REFERENCE IMAGES ---
+            # --- DISPLAY REFERENCE IMAGES (HTML/CSS Flexbox for Mobile Side-by-Side) ---
             st.divider()
             st.markdown("#### Reference Examples")
             
-            c_good, c_bad = st.columns(2)
-            with c_good:
-                st.caption("✅ High Quality")
-                if guideline_imgs.get("high"):
-                    st.image(guideline_imgs["high"], width='stretch')
-                else:
-                    st.caption("(Image not found)")
+            # Preleviamo le immagini base64 (o placeholder se mancano)
+            high_b64 = guideline_imgs.get("high", "")
+            low_b64 = guideline_imgs.get("low", "")
             
-            with c_bad:
-                st.caption("❌ Low Quality")
-                if guideline_imgs.get("low"):
-                    st.image(guideline_imgs["low"], width='stretch')
-                else:
-                    st.caption("(Image not found)")
+            # Costruiamo l'HTML con CSS Flexbox per forzare il side-by-side anche su mobile
+            html_content = f"""
+            <div style="display: flex; flex-direction: row; gap: 10px; justify-content: center; width: 100%;">
+                <div style="flex: 1; text-align: center;">
+                    <p style="margin-bottom: 5px; font-weight: bold; font-size: 0.9em;">✅ High Quality</p>
+                    <img src="{high_b64}" style="width: 100%; border-radius: 5px; object-fit: cover; aspect-ratio: 4/3;">
+                </div>
+                <div style="flex: 1; text-align: center;">
+                    <p style="margin-bottom: 5px; font-weight: bold; font-size: 0.9em;">❌ Low Quality</p>
+                    <img src="{low_b64}" style="width: 100%; border-radius: 5px; object-fit: cover; aspect-ratio: 4/3;">
+                </div>
+            </div>
+            """
+            st.markdown(html_content, unsafe_allow_html=True)
 
         with col2:
             st.markdown("### Image to Evaluate")
             if image:
-                st.image(image, width='stretch')
+                st.image(image, width=None, width='stretch') # Aggiornato per nuove versioni
             
             st.markdown(f"<b>Dataset:</b> {folder_name}", unsafe_allow_html=True)
             
@@ -608,7 +593,7 @@ def main():
             c_back, c_save, c_summ = st.columns([1, 1.5, 1])
             
             with c_back:
-                if st.button("⬅️ Back", width='stretch'):
+                if st.button("⬅️ Back", width=None, width='stretch'):
                     if indice > 0:
                         if st.session_state.valutazioni:
                             st.session_state.valutazioni.pop()
@@ -616,7 +601,7 @@ def main():
                         st.rerun()
             
             with c_save:
-                if st.button("Next ➜", width='stretch', type="primary"):
+                if st.button("Next ➜", width=None, width='stretch', type="primary"):
                     st.session_state.valutazioni.append({
                         "id_utente": user_id,
                         "esperienza": esperienza,
@@ -624,17 +609,18 @@ def main():
                         "file_id": img_file['id'], 
                         "score": score,
                         "dataset": folder_name,
-                        "file_txt_assegnato": st.session_state.current_txt_file,
+                        "batch_txt": st.session_state.current_txt_file,
                         "timestamp": _now_rome_str()
                     })
                     st.session_state.indice += 1
                     st.rerun()
 
             with c_summ:
-                if st.button("📋 Summary", width='stretch'):
+                if st.button("📋 Summary", width=None, width='stretch'):
                     visualizza_riepilogo()
-        
-        st.markdown(f"<center><small>Image {indice + 1} of {len(imgs)}</small></center>", unsafe_allow_html=True)
+
+            # --- MODIFICA 1: Spostato contatore QUI ---
+            st.markdown(f"<div style='text-align: center; margin-top: 10px; color: grey;'>Image {indice + 1} of {len(imgs)}</div>", unsafe_allow_html=True)
         
         if indice + 1 < len(imgs):
             next_id = imgs[indice + 1]['img_obj']['id']
@@ -654,30 +640,25 @@ def main():
 
             st.write("") 
 
-
-            if st.button("💾 SAVE AND SUBMIT RESULTS", type="primary", width='stretch'):
+            if st.button("💾 SAVE AND SUBMIT RESULTS", type="primary", width=None, width='stretch'):
                 with st.spinner("Saving Results..."):
                     
-                    # 1. Prepariamo i dati aggiungendo il feedback a ogni riga
+                    # 1. Prepariamo i dati
                     dati_da_salvare = []
                     for val in st.session_state.valutazioni:
-                        # Creiamo una copia per non sporcare la session state
                         entry = val.copy()
-                        # Aggiungiamo il feedback (è uguale per tutte le immagini di questa sessione)
                         entry['feedback'] = feedback_text 
-                        # Rimuoviamo colonne inutili per il sheet se presenti
                         entry.pop('file_id', None)
                         entry.pop('anteprima', None)
                         dati_da_salvare.append(entry)
 
-                    # 2. Usiamo la NUOVA funzione di salvataggio sicuro
+                    # 2. Usiamo la funzione di salvataggio sicuro
                     success = safe_append_data(dati_da_salvare, worksheet_name="Results")
 
                     if success:
                         st.session_state.salvato = True
                         st.rerun()
                     else:
-                        # Fallback: se fallisce gspread, offri il CSV
                         st.error("⚠️ Errore di connessione a Google Sheets.")
                         df = pd.DataFrame(st.session_state.valutazioni)
                         csv = df.to_csv(index=False)
