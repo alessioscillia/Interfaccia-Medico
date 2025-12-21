@@ -584,7 +584,7 @@ def main():
         with col2:
             st.markdown("### Image to Evaluate")
             if image:
-                st.image(image, width=None, width='stretch') # Aggiornato per nuove versioni
+                st.image(image, width='stretch') # Aggiornato per nuove versioni
             
             st.markdown(f"<b>Dataset:</b> {folder_name}", unsafe_allow_html=True)
             
@@ -593,7 +593,7 @@ def main():
             c_back, c_save, c_summ = st.columns([1, 1.5, 1])
             
             with c_back:
-                if st.button("⬅️ Back", width=None, width='stretch'):
+                if st.button("⬅️ Back", width='stretch'):
                     if indice > 0:
                         if st.session_state.valutazioni:
                             st.session_state.valutazioni.pop()
@@ -601,7 +601,7 @@ def main():
                         st.rerun()
             
             with c_save:
-                if st.button("Next ➜", width=None, width='stretch', type="primary"):
+                if st.button("Next ➜", width='stretch', type="primary"):
                     st.session_state.valutazioni.append({
                         "id_utente": user_id,
                         "esperienza": esperienza,
@@ -616,7 +616,7 @@ def main():
                     st.rerun()
 
             with c_summ:
-                if st.button("📋 Summary", width=None, width='stretch'):
+                if st.button("📋 Summary", width='stretch'):
                     visualizza_riepilogo()
 
             # --- MODIFICA 1: Spostato contatore QUI ---
@@ -640,7 +640,7 @@ def main():
 
             st.write("") 
 
-            if st.button("💾 SAVE AND SUBMIT RESULTS", type="primary", width=None, width='stretch'):
+            if st.button("💾 SAVE AND SUBMIT RESULTS", type="primary", width='stretch'):
                 with st.spinner("Saving Results..."):
                     
                     # 1. Prepariamo i dati
